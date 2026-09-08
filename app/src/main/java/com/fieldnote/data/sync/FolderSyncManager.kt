@@ -16,9 +16,17 @@ data class SyncResult(val uploaded: Int, val downloaded: Int, val conflicts: Int
 
 /**
  * Syncs notes/todos against a user-picked SAF folder (see [SafFileStore]) instead of the Drive
- * REST API. The local dirty/revision bookkeeping in [LocalNoteStore] and the conflict rules in
- * [SyncDecision] are unchanged from the previous OAuth-based implementation -- only the transport
- * (network calls -> SAF file I/O) was replaced.
+ * REST API. The local dirty/revision bookkeeping in [LocalNoteStore] is unchanged from the
+ * previous OAuth-based implementation -- only the transport (network calls -> SAF file I/O) was
+ * replaced.
+ *
+ * A [SyncDecision.CONFLICT] is always logged to `sync_conflicts` for visibility, and then
+ * resolved automatically: whichever copy (local or remote) has the later `updatedAt` becomes
+ * canonical, and the copy that loses is written to a `Conflicts/` folder instead of being
+ * discarded. Earlier versions left a conflict's local dirty flag and `lastSyncedRevision`
+ * completely untouched, so the exact same conflict was re-detected -- and re-logged -- on every
+ * subsequent sync pass with no way to ever converge; this is what actually broke, not (only) the
+ * concurrent-sync race fixed alongside it.
  */
 class FolderSyncManager(context: Context) {
     private val appContext = context.applicationContext
@@ -48,8 +56,9 @@ class FolderSyncManager(context: Context) {
         val root = store.rootFolder(rootTreeUri)
         val notesFolder = store.childFolder(root, "Notes")
         val todosFolder = store.childFolder(root, "Todos")
-        val notesResult = syncNotes(notesFolder)
-        val todosResult = syncTodos(todosFolder)
+        val conflictsFolder = store.childFolder(root, "Conflicts")
+        val notesResult = syncNotes(notesFolder, conflictsFolder)
+        val todosResult = syncTodos(todosFolder, conflictsFolder)
         val result = SyncResult(
             uploaded = notesResult.uploaded + todosResult.uploaded,
             downloaded = notesResult.downloaded + todosResult.downloaded,
@@ -61,7 +70,8 @@ class FolderSyncManager(context: Context) {
             SyncSnapshot(
                 phase = phase,
                 message = if (phase == SyncPhase.Conflict) {
-                    "충돌이 있는 채로 동기화를 마쳤습니다. 로컬과 폴더 사본을 모두 보존했습니다."
+                    "충돌이 감지되어 더 최근에 수정된 쪽으로 자동 반영했습니다. 이전 내용은 " +
+                        "Conflicts 폴더에 보존했습니다."
                 } else {
                     "동기화 완료."
                 },
@@ -73,7 +83,7 @@ class FolderSyncManager(context: Context) {
         result
     }
 
-    private fun syncNotes(folder: SyncFolderHandle): SyncResult {
+    private fun syncNotes(folder: SyncFolderHandle, conflictsFolder: SyncFolderHandle): SyncResult {
         var uploaded = 0
         var downloaded = 0
         val remoteFiles = store.listJsonFiles(folder)
@@ -109,6 +119,22 @@ class FolderSyncManager(context: Context) {
                         "note", note.id, note.revision, remoteRevision,
                         note.updatedAt, remoteUpdatedAt
                     )
+                    // Neither markNoteSynced nor upsertRemoteNote used to run here, so the local
+                    // dirty flag and lastSyncedRevision never moved -- the very next sync pass
+                    // compared the exact same stuck state and logged the identical conflict
+                    // again, forever. Resolve it now (most-recently-updated copy wins) so sync
+                    // converges instead of looping; the copy that loses is preserved in
+                    // Conflicts/ rather than silently discarded.
+                    if (note.updatedAt >= remoteUpdatedAt) {
+                        store.upsertJson(conflictsFolder, "note-$id-$remoteUpdatedAt.json", remote.toString())
+                        store.upsertJson(folder, id + ".json", note.toJson().toString())
+                        local.markNoteSynced(note.id, id + ".json", note.revision, note.updatedAt)
+                        uploaded++
+                    } else {
+                        store.upsertJson(conflictsFolder, "note-$id-${note.updatedAt}.json", note.toJson().toString())
+                        local.upsertRemoteNote(remote.toNoteRecord(id, remoteRevision, remoteUpdatedAt))
+                        downloaded++
+                    }
                 }
                 SyncAction.UPLOAD -> {
                     val note = checkNotNull(localNote)
@@ -128,7 +154,7 @@ class FolderSyncManager(context: Context) {
         return SyncResult(uploaded, downloaded, local.conflictCount())
     }
 
-    private fun syncTodos(folder: SyncFolderHandle): SyncResult {
+    private fun syncTodos(folder: SyncFolderHandle, conflictsFolder: SyncFolderHandle): SyncResult {
         var uploaded = 0
         var downloaded = 0
         val remoteFiles = store.listJsonFiles(folder)
@@ -164,6 +190,16 @@ class FolderSyncManager(context: Context) {
                         "todo", todo.id.toString(), todo.revision, remoteRevision,
                         todo.updatedAt, remoteUpdatedAt
                     )
+                    if (todo.updatedAt >= remoteUpdatedAt) {
+                        store.upsertJson(conflictsFolder, "todo-$id-$remoteUpdatedAt.json", remote.toString())
+                        store.upsertJson(folder, id.toString() + ".json", todo.toJson().toString())
+                        local.markTodoSynced(todo.id, id.toString() + ".json", todo.revision, todo.updatedAt)
+                        uploaded++
+                    } else {
+                        store.upsertJson(conflictsFolder, "todo-$id-${todo.updatedAt}.json", todo.toJson().toString())
+                        local.upsertRemoteTodo(remote.toTodoRecord(id, remoteRevision, remoteUpdatedAt))
+                        downloaded++
+                    }
                 }
                 SyncAction.UPLOAD -> {
                     val todo = checkNotNull(localTodo)

@@ -1,45 +1,78 @@
-﻿# Field Note Google/Drive Setup
+# FieldNote 동기화 설정 (Storage Access Framework)
 
-현재 로컬 앱 정보:
+이 앱은 더 이상 Drive REST API나 Google OAuth 앱 등록을 사용하지 않는다.
+대신 Android의 **Storage Access Framework(SAF)** 로 사용자가 시스템 "파일
+선택" 창에서 폴더를 직접 고르고, 그 폴더에 대한 읽기/쓰기 권한만 받아 일반
+파일처럼 노트/할 일 JSON을 저장한다.
 
-- Application ID: `com.fieldnote`
-- Version name: `1.0.4`
-- Version code: `5`
-- Release certificate SHA-1: `27:D0:54:B7:A8:0D:CC:3F:C8:C6:E7:A9:E6:6E:9C:5E:20:F6:CB:D5`
-- Release certificate SHA-256: `57:D4:19:E3:8A:23:7A:B2:98:49:9D:B8:58:05:0E:06:61:26:8E:2D:B5:F8:BD:2F:BC:2A:76:B0:A6:5F:1E:C7`
+## 왜 이렇게 바꿨나
 
-v1.0.4 현재 구현:
+이전 버전(REST API + OAuth)은 Google Cloud Console에 앱을 미리 등록해야 했고
+(`Android OAuth 클라이언트`, SHA-1 등록, 동의 화면, 테스트 사용자...), 등록이
+조금만 어긋나도 `DEVELOPER_ERROR(10)`, `UNREGISTERED_ON_API_CONSOLE` 같은
+오류가 반복됐다. SAF 방식은 **Google Cloud Console 등록이 전혀 필요 없다** —
+사용자가 이미 로그인해 둔 Google Drive 앱(또는 OneDrive, Dropbox 등 SAF를
+지원하는 다른 클라우드 앱)의 인증을 그대로 빌려 쓰기 때문이다.
 
-- Android 시스템 계정 선택 화면으로 기기 내 Google 계정 선택
-- 선택 계정명 로컬 저장
-- 계정별 로컬 동기화 준비 폴더 자동 생성
-- 설정 화면에서 계정 변경, 연결 해제, 폴더 자동 설정, 동기화 실행 상태 표시
-- 앱 재시작 후 선택 계정과 저장 폴더 복원
+대신 트레이드오프가 있다: 폴더가 자동으로 만들어지는 게 아니라 **사용자가
+기기마다 한 번씩 직접 골라야** 한다.
 
-Phase 7-9 원격 동기화 진행에 필요한 외부 설정:
+## 사용 방법
 
-1. Google Cloud Console에서 Android OAuth Client 생성
-2. Package name에 `com.fieldnote` 등록
-3. 위 release SHA-1 등록
-4. Web OAuth Client 생성 또는 기존 Web Client ID 제공
-5. Google Calendar API 활성화
-6. Google Drive API 활성화
-7. 앱 전용 Drive 폴더 또는 지정 폴더 ID 확정
-8. Calendar/Drive OAuth scope와 동의 화면 게시 상태 확정
-9. APK 업데이트용 `version.json` 형식 확정
+1. 기기에 **Google Drive 앱이 설치되어 있고 로그인**되어 있어야 한다
+   (대부분의 Android 기기에 기본 설치되어 있다).
+2. 앱 설정 화면 → **동기화 폴더 → "폴더 선택"**을 누른다.
+3. 시스템 파일 선택창이 뜨면 왼쪽 상단 메뉴에서 **Google Drive**로 들어가서,
+   동기화에 쓸 폴더를 고른다. 없다면 그 화면에서 새 폴더를 만들어도 된다
+   (예: "FieldNote").
+4. 폴더를 고르면 그 안에 `Notes/`, `Todos/` 하위 폴더가 자동으로 만들어지고
+   바로 동기화가 시작된다.
 
-APK 업데이트용 기본 JSON 후보:
-
-```json
-{
-  "versionName": "1.0.5",
-  "versionCode": 6,
-  "apkFileName": "FieldNote-v1.0.5-release.apk",
-  "sha256": "APK_SHA256_VALUE"
-}
+```text
+(사용자가 고른 폴더)/
+├── Notes/
+│   └── {UUID}.json
+└── Todos/
+    └── {id}.json
 ```
 
-주의:
+## 다른 기기에서 같은 내용 쓰기
 
-- 이후 업데이트 APK는 반드시 `keystore/fieldnote-v1.jks`와 같은 키로 서명해야 설치 업데이트가 가능하다.
-- 현재 `keystore.properties`는 로컬 개발 편의를 위한 평문 설정 파일이므로 외부 공유/커밋 대상에서 제외해야 한다.
+두 번째 기기에도 앱을 설치하고, 설정 → 폴더 선택에서 **첫 번째 기기와 정확히
+같은 폴더**를 고르면 된다. 자동으로 찾아주지 않으므로, 처음 만들 때 폴더
+이름을 기억해 두거나, Google Drive 앱에서 "공유 항목"으로 표시해 쉽게 찾을 수
+있게 해두면 편하다.
+
+노트/할 일 JSON 파일 안에 `id`, `revision`, `updatedAt`이 함께 저장되므로,
+폴더 안의 파일 목록만 보고도 각 기기가 무엇이 더 최신인지 판단할 수 있다 —
+Drive의 별도 메타데이터 API는 필요 없다.
+
+## 동기화 동작
+
+- 노트와 할 일은 먼저 기기의 SQLite DB에 저장되므로 오프라인에서도 동작한다.
+- 로컬 변경은 `dirty`로 표시되고 네트워크 연결 조건의 WorkManager 작업이
+  예약된다(즉시 1회 + 15분 주기).
+- 로컬과 원격이 마지막 동기화 이후 모두 변경되면 `revision`/`updatedAt`으로
+  충돌을 감지한다. 충돌 시 어느 쪽도 덮어쓰지 않고 로컬 `sync_conflicts`
+  테이블에 기록한다.
+- 파일 쓰기는 항상 "있으면 덮어쓰고 없으면 새로 만든다"(upsert) 방식이라,
+  네트워크 재시도로 인해 같은 이름의 파일이 중복 생성되지 않는다.
+
+## 권한이 끊기는 경우
+
+다음 상황에서는 동기화 폴더 접근 권한이 사라질 수 있다 — 이때는 설정에서
+**폴더 선택**을 다시 누르면 된다(다른 데이터는 그대로 있다).
+
+- Google Drive 앱을 삭제 후 재설치함
+- Android 설정 → 앱 → FieldNote → 저장공간/권한에서 수동으로 접근을 취소함
+- Drive에서 그 폴더 자체를 삭제하거나 휴지통으로 옮김
+
+설정 화면의 "연결 해제"는 이 기기에서 로컬 연결 정보만 지우는 것이며, 폴더나
+그 안의 파일은 그대로 남는다.
+
+## 참고: 이전 OAuth 방식에서 넘어온 경우
+
+`versionCode 8`(v1.0.7) 이하에서 이미 Drive REST API로 동기화를 쓰고
+있었다면, `MyNoteApp/Notes`, `MyNoteApp/Todos` 폴더가 Drive에 남아있다. 이
+버전으로 업데이트한 뒤 설정에서 그 **`MyNoteApp` 폴더를 그대로 선택**하면
+기존 노트/할 일을 이어서 쓸 수 있다.

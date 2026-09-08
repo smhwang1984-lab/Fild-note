@@ -89,11 +89,10 @@ fun FieldNoteApp(viewModel: MainViewModel) {
                         SettingsScreen(
                             uiState = viewModel.uiState,
                             featureStatuses = featureStatuses,
-                            googleSyncState = viewModel.googleSyncState,
-                            onGoogleAccountSelected = viewModel::connectGoogleAccount,
-                            onGoogleAccountDisconnected = viewModel::disconnectGoogleAccount,
+                            syncState = viewModel.syncState,
+                            onSyncFolderPicked = viewModel::onSyncFolderPicked,
+                            onSyncFolderDisconnected = viewModel::disconnectSyncFolder,
                             onSyncNow = viewModel::syncNow,
-                            onAutoConfigureSyncFolder = viewModel::autoConfigureSyncFolder,
                             tabletMode = tabletMode
                         )
                     }

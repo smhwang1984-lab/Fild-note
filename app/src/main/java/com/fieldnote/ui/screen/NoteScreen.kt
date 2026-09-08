@@ -31,6 +31,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -44,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -58,6 +60,8 @@ import com.fieldnote.MainViewModel
 import com.fieldnote.NoteTodoPlacement
 import com.fieldnote.TodoItem
 import com.fieldnote.ui.navigation.ScreenFrame
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -76,8 +80,15 @@ private data class InkStroke(
 
 @Composable
 fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
-    val pageNumbers = remember { mutableStateMapOf(1 to true) }
-    val pageStrokes = remember { mutableStateMapOf(1 to emptyList<InkStroke>()) }
+    val initialPages = remember(viewModel.currentNote.id) { decodePages(viewModel.currentNote.content) }
+    val pageNumbers = remember(viewModel.currentNote.id) {
+        mutableStateMapOf<Int, Boolean>().apply {
+            initialPages.keys.forEach { put(it, true) }
+        }
+    }
+    val pageStrokes = remember(viewModel.currentNote.id) {
+        mutableStateMapOf<Int, List<InkStroke>>().apply { putAll(initialPages) }
+    }
     var currentPage by remember { mutableIntStateOf(1) }
     var undoStack by remember { mutableStateOf(emptyList<List<InkStroke>>()) }
     var redoStack by remember { mutableStateOf(emptyList<List<InkStroke>>()) }
@@ -89,10 +100,27 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var pan by remember { mutableStateOf(Offset.Zero) }
     var penOnlyMode by remember { mutableStateOf(true) }
 
+    LaunchedEffect(viewModel.currentNote.content) {
+        if (encodePages(pageStrokes) != viewModel.currentNote.content) {
+            val remotePages = decodePages(viewModel.currentNote.content)
+            pageStrokes.clear()
+            pageStrokes.putAll(remotePages)
+            pageNumbers.clear()
+            remotePages.keys.forEach { pageNumbers[it] = true }
+            currentPage = remotePages.keys.minOrNull() ?: 1
+            undoStack = emptyList()
+            redoStack = emptyList()
+        }
+    }
+
     fun strokes(): List<InkStroke> = pageStrokes[currentPage].orEmpty()
 
     fun setStrokes(value: List<InkStroke>) {
         pageStrokes[currentPage] = value
+    }
+
+    fun persistNote() {
+        viewModel.saveNoteContent(encodePages(pageStrokes))
     }
 
     fun commitSnapshot(before: List<InkStroke>) {
@@ -105,6 +133,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
             redoStack = redoStack + listOf(strokes())
             setStrokes(undoStack.last())
             undoStack = undoStack.dropLast(1)
+            persistNote()
         }
     }
 
@@ -113,6 +142,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
             undoStack = undoStack + listOf(strokes())
             setStrokes(redoStack.last())
             redoStack = redoStack.dropLast(1)
+            persistNote()
         }
     }
 
@@ -126,6 +156,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         liveStroke = null
         pan = Offset.Zero
         zoom = 1f
+        persistNote()
     }
 
     fun selectPage(page: Int) {
@@ -181,10 +212,12 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                         commitSnapshot(before)
                         setStrokes(before + stroke)
                         liveStroke = null
+                        persistNote()
                     },
                     onEraseCommitted = { before, after ->
                         commitSnapshot(before)
                         setStrokes(after)
+                        persistNote()
                     },
                     onTodoMoved = viewModel::moveNoteTodo,
                     onTodoResized = viewModel::resizeNoteTodo,
@@ -236,10 +269,12 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                         commitSnapshot(before)
                         setStrokes(before + stroke)
                         liveStroke = null
+                        persistNote()
                     },
                     onEraseCommitted = { before, after ->
                         commitSnapshot(before)
                         setStrokes(after)
+                        persistNote()
                     },
                     onTodoMoved = viewModel::moveNoteTodo,
                     onTodoResized = viewModel::resizeNoteTodo,
@@ -252,6 +287,56 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         }
     }
 }
+
+private fun encodePages(pages: Map<Int, List<InkStroke>>): String {
+    val pageObject = JSONObject()
+    pages.toSortedMap().forEach { (page, strokes) ->
+        val strokeArray = JSONArray()
+        strokes.forEach { stroke ->
+            val points = JSONArray()
+            stroke.points.forEach { point ->
+                points.put(JSONArray().put(point.x.toDouble()).put(point.y.toDouble()))
+            }
+            strokeArray.put(
+                JSONObject()
+                    .put("color", stroke.color.toArgb())
+                    .put("width", stroke.width.toDouble())
+                    .put("points", points)
+            )
+        }
+        pageObject.put(page.toString(), strokeArray)
+    }
+    return JSONObject().put("pages", pageObject).toString()
+}
+
+private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatching {
+    val result = mutableMapOf<Int, List<InkStroke>>()
+    val pages = JSONObject(content).getJSONObject("pages")
+    pages.keys().forEach { pageKey ->
+        val strokesJson = pages.getJSONArray(pageKey)
+        val strokes = buildList {
+            for (strokeIndex in 0 until strokesJson.length()) {
+                val strokeJson = strokesJson.getJSONObject(strokeIndex)
+                val pointsJson = strokeJson.getJSONArray("points")
+                val points = buildList {
+                    for (pointIndex in 0 until pointsJson.length()) {
+                        val point = pointsJson.getJSONArray(pointIndex)
+                        add(Offset(point.getDouble(0).toFloat(), point.getDouble(1).toFloat()))
+                    }
+                }
+                add(
+                    InkStroke(
+                        color = Color(strokeJson.getInt("color")),
+                        width = strokeJson.getDouble("width").toFloat(),
+                        points = points
+                    )
+                )
+            }
+        }
+        result[pageKey.toInt()] = strokes
+    }
+    result.ifEmpty { mapOf(1 to emptyList()) }
+}.getOrElse { mapOf(1 to emptyList()) }
 
 @Composable
 private fun NoteToolPanel(

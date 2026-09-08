@@ -1,8 +1,6 @@
 ﻿package com.fieldnote.ui.screen
 
-import android.accounts.Account
-import android.accounts.AccountManager
-import android.app.Activity
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -23,8 +21,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.fieldnote.GoogleSyncState
 import com.fieldnote.MainUiState
+import com.fieldnote.SyncUiState
 import com.fieldnote.data.FeatureStatus
 import com.fieldnote.ui.navigation.ScreenFrame
 
@@ -32,32 +30,15 @@ import com.fieldnote.ui.navigation.ScreenFrame
 fun SettingsScreen(
     uiState: MainUiState,
     featureStatuses: List<FeatureStatus>,
-    googleSyncState: GoogleSyncState,
-    onGoogleAccountSelected: (String) -> Unit,
-    onGoogleAccountDisconnected: () -> Unit,
+    syncState: SyncUiState,
+    onSyncFolderPicked: (Uri) -> Unit,
+    onSyncFolderDisconnected: () -> Unit,
     onSyncNow: () -> Unit,
-    onAutoConfigureSyncFolder: () -> Unit,
     tabletMode: Boolean
 ) {
-    val accountPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val accountName = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
-            if (!accountName.isNullOrBlank()) onGoogleAccountSelected(accountName)
-        }
-    }
-
-    fun launchGoogleAccountPicker() {
-        val intent = AccountManager.newChooseAccountIntent(
-            null as Account?,
-            null as List<Account>?,
-            arrayOf("com.google"),
-            "필드 노트 동기화에 사용할 Google 계정을 선택하세요.",
-            null,
-            null,
-            null
-        )
-        accountPicker.launch(intent)
-    }
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri -> uri?.let(onSyncFolderPicked) }
 
     ScreenFrame(title = "설정", subtitle = "버전 및 동기화") {
         if (tabletMode) {
@@ -65,12 +46,11 @@ fun SettingsScreen(
                 SettingsMenu(modifier = Modifier.width(220.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.weight(1f)) {
                     VersionCard(uiState = uiState)
-                    GoogleSyncCard(
-                        state = googleSyncState,
-                        onConnect = ::launchGoogleAccountPicker,
-                        onDisconnect = onGoogleAccountDisconnected,
-                        onSyncNow = onSyncNow,
-                        onAutoConfigureSyncFolder = onAutoConfigureSyncFolder
+                    SyncFolderCard(
+                        state = syncState,
+                        onPickFolder = { folderPickerLauncher.launch(null) },
+                        onDisconnect = onSyncFolderDisconnected,
+                        onSyncNow = onSyncNow
                     )
                     FeatureStatusList(featureStatuses = featureStatuses)
                 }
@@ -79,12 +59,11 @@ fun SettingsScreen(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SettingsMenu(modifier = Modifier.fillMaxWidth())
                 VersionCard(uiState = uiState)
-                GoogleSyncCard(
-                    state = googleSyncState,
-                    onConnect = ::launchGoogleAccountPicker,
-                    onDisconnect = onGoogleAccountDisconnected,
-                    onSyncNow = onSyncNow,
-                    onAutoConfigureSyncFolder = onAutoConfigureSyncFolder
+                SyncFolderCard(
+                    state = syncState,
+                    onPickFolder = { folderPickerLauncher.launch(null) },
+                    onDisconnect = onSyncFolderDisconnected,
+                    onSyncNow = onSyncNow
                 )
                 FeatureStatusList(featureStatuses = featureStatuses)
             }
@@ -102,7 +81,7 @@ private fun SettingsMenu(modifier: Modifier = Modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(12.dp)) {
             Text(text = "설정 메뉴", style = MaterialTheme.typography.titleMedium)
             OutlinedButton(onClick = {}, modifier = Modifier.fillMaxWidth()) { Text("버전") }
-            OutlinedButton(onClick = {}, modifier = Modifier.fillMaxWidth()) { Text("Google 동기화") }
+            OutlinedButton(onClick = {}, modifier = Modifier.fillMaxWidth()) { Text("동기화 폴더") }
             OutlinedButton(onClick = {}, modifier = Modifier.fillMaxWidth()) { Text("진행 상태") }
         }
     }
@@ -128,12 +107,11 @@ private fun VersionCard(uiState: MainUiState) {
 }
 
 @Composable
-private fun GoogleSyncCard(
-    state: GoogleSyncState,
-    onConnect: () -> Unit,
+private fun SyncFolderCard(
+    state: SyncUiState,
+    onPickFolder: () -> Unit,
     onDisconnect: () -> Unit,
-    onSyncNow: () -> Unit,
-    onAutoConfigureSyncFolder: () -> Unit
+    onSyncNow: () -> Unit
 ) {
     Card(
         shape = RoundedCornerShape(8.dp),
@@ -141,16 +119,22 @@ private fun GoogleSyncCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
-            Text(text = "Google 계정 동기화", style = MaterialTheme.typography.titleMedium)
-            Text(text = state.accountName?.let { "연결 계정: $it" } ?: "연결 계정: 없음", style = MaterialTheme.typography.bodyMedium)
-            Text(text = state.syncFolderPath?.let { "저장 폴더: $it" } ?: "저장 폴더: 자동 설정 전", style = MaterialTheme.typography.bodySmall)
+            Text(text = "동기화 폴더", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "시스템 파일 선택창에서 Google Drive(또는 다른 클라우드 앱) 안의 폴더를 " +
+                    "고르세요. 다른 기기에서도 같은 폴더를 선택하면 내용이 동기화됩니다.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(text = state.folderName?.let { "선택한 폴더: $it" } ?: "선택한 폴더: 없음", style = MaterialTheme.typography.bodyMedium)
             Text(text = state.lastSyncedAt?.let { "마지막 동기화: $it" } ?: "마지막 동기화: 없음", style = MaterialTheme.typography.bodySmall)
+            Text(text = "대기 ${state.pendingChanges}개 · 충돌 ${state.conflicts}개", style = MaterialTheme.typography.bodySmall)
             Text(text = state.message, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onConnect) { Text(if (state.accountName == null) "계정 연결" else "계정 변경") }
-                OutlinedButton(onClick = onAutoConfigureSyncFolder, enabled = state.accountName != null) { Text("폴더 자동 설정") }
-                OutlinedButton(onClick = onSyncNow, enabled = state.accountName != null) { Text("동기화") }
-                OutlinedButton(onClick = onDisconnect, enabled = state.accountName != null) { Text("연결 해제") }
+                Button(onClick = onPickFolder, enabled = !state.syncing) {
+                    Text(if (state.folderName == null) "폴더 선택" else "폴더 변경")
+                }
+                OutlinedButton(onClick = onSyncNow, enabled = state.folderName != null && !state.syncing) { Text("동기화") }
+                OutlinedButton(onClick = onDisconnect, enabled = state.folderName != null && !state.syncing) { Text("연결 해제") }
             }
         }
     }

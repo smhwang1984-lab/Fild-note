@@ -26,10 +26,10 @@ class LocalFieldNoteRepository : FieldNoteRepository {
             FeatureStatus("할 일 수동 제거", "3단계", "완료"),
             FeatureStatus("할 일 목록", "4단계", "완료"),
             FeatureStatus("월간 달력", "5단계", "완료"),
-            FeatureStatus("Google 계정 선택", "6단계", "완료"),
-            FeatureStatus("동기화 저장 폴더 자동 설정", "6단계", "완료"),
+            FeatureStatus("Google OAuth 계정 연결", "6단계", "완료"),
+            FeatureStatus("Drive 앱 루트 자동 생성", "6단계", "완료"),
             FeatureStatus("Google Calendar 원격 동기화", "7단계", "OAuth 설정 필요"),
-            FeatureStatus("Drive 원격 동기화", "8단계", "Drive 설정 필요"),
+            FeatureStatus("Drive 증분 양방향 동기화", "8단계", "OAuth 설정 필요"),
             FeatureStatus("APK 업데이트", "9단계", "Drive 폴더 필요")
         )
     )

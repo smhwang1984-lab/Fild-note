@@ -88,10 +88,20 @@ class SafFileStore(private val context: Context) : SyncFileStore {
     // -- Below: not part of the SyncFileStore contract (arbitrary/binary files, not the
     // note/todo JSON entities), used only by AppUpdateChecker.
 
-    /** Finds a file named [name] directly under [folder] (non-recursive), or null. */
+    /**
+     * Finds a file directly under [folder] (non-recursive) matching [name], ignoring case and
+     * surrounding whitespace -- SAF providers (Drive included) preserve whatever the uploading
+     * device typed, and a strict exact match silently found nothing for anything but a perfect
+     * match (e.g. "Update.apk" or "update.apk " from a different OS/uploader).
+     */
     fun findFile(folder: SyncFolderHandle, name: String): SyncFileHandle? {
-        val found = (folder as SafFolderHandle).document.findFile(name) ?: return null
-        return if (found.isFile) SafFileHandle(found) else null
+        val parentDoc = (folder as SafFolderHandle).document
+        // Try the fast exact-match path first (most providers optimize findFile()).
+        parentDoc.findFile(name)?.takeIf { it.isFile }?.let { return SafFileHandle(it) }
+        val match = parentDoc.listFiles().firstOrNull {
+            it.isFile && it.name?.trim()?.equals(name, ignoreCase = true) == true
+        }
+        return match?.let { SafFileHandle(it) }
     }
 
     /** Copies [file]'s raw bytes to a local [destination] file (overwriting it if present). */

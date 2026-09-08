@@ -24,6 +24,7 @@ import com.fieldnote.data.sync.SyncSnapshot
 import com.fieldnote.data.sync.SyncStatusMonitor
 import com.fieldnote.data.sync.hasPersistedSyncPermission
 import com.fieldnote.update.AppUpdateChecker
+import com.fieldnote.update.UpdateCheckResult
 import com.fieldnote.update.UpdateInfo
 import java.time.Instant
 import java.time.ZoneId
@@ -241,17 +242,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun checkForUpdate(treeUri: Uri) {
         viewModelScope.launch {
-            val info = withContext(Dispatchers.IO) {
-                runCatching { AppUpdateChecker.check(getApplication(), treeUri) }.getOrNull()
-            }
-            pendingUpdate = info
-            updateState = if (info != null) {
-                UpdateUiState(
-                    availableVersionName = info.versionName,
-                    message = "새 버전 ${info.versionName}을(를) 설치할 수 있습니다."
-                )
-            } else {
-                UpdateUiState()
+            val result = withContext(Dispatchers.IO) { AppUpdateChecker.check(getApplication(), treeUri) }
+            when (result) {
+                is UpdateCheckResult.Available -> {
+                    pendingUpdate = result.info
+                    updateState = UpdateUiState(
+                        availableVersionName = result.info.versionName,
+                        message = "새 버전 ${result.info.versionName}을(를) 설치할 수 있습니다."
+                    )
+                }
+                is UpdateCheckResult.NotFound -> {
+                    pendingUpdate = null
+                    updateState = UpdateUiState(message = "동기화 폴더 루트에서 update.apk를 찾지 못했습니다.")
+                }
+                is UpdateCheckResult.UpToDate -> {
+                    pendingUpdate = null
+                    updateState = UpdateUiState(message = "최신 버전을 사용 중입니다(update.apk도 ${result.versionName}).")
+                }
+                is UpdateCheckResult.Failed -> {
+                    pendingUpdate = null
+                    updateState = UpdateUiState(message = "업데이트 확인 실패: ${result.message}")
+                }
             }
         }
     }

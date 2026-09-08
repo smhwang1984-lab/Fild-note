@@ -108,14 +108,10 @@ private fun VersionCard(
         Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
             Text(text = "현재 버전: ${uiState.versionName}", style = MaterialTheme.typography.titleMedium)
             Text(
-                text = updateState.availableVersionName?.let { "새 버전: $it" } ?: "최신 버전을 사용 중입니다",
+                text = updateState.message ?: "동기화 폴더 루트에 update.apk 파일을 두면 동기화할 때마다 자동으로 확인합니다.",
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(text = "대상 기기: ${uiState.targetDevices.joinToString()}", style = MaterialTheme.typography.bodySmall)
-            Text(
-                text = "동기화 폴더 루트에 update.apk 파일을 두면 동기화할 때마다 자동으로 확인합니다.",
-                style = MaterialTheme.typography.bodySmall
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onRefresh) { Text("새로고침") }
                 Button(onClick = onInstallUpdate, enabled = updateState.availableVersionName != null) { Text("업데이트") }

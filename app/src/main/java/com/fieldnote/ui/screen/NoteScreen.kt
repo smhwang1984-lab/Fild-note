@@ -6,7 +6,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -609,7 +608,10 @@ private fun NoteCanvas(
             .background(paperColor, RoundedCornerShape(8.dp))
             .pointerInput(activeTool, selectedColor, strokeWidth, zoom, pan, penOnlyMode, strokes.size, selectedStrokes) {
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // requireUnconsumed defaults to true: a touch that landed on a todo card
+                    // (which now consumes its own down/move events, see TodoOnNoteCard) is
+                    // skipped here instead of also starting a drawing gesture underneath it.
+                    val down = awaitFirstDown()
                     val before = strokes.toList()
 
                     if (activeTool == NoteTool.Move) {
@@ -635,6 +637,11 @@ private fun NoteCanvas(
                     }
 
                     if (activeTool == NoteTool.Cut) {
+                        // A second finger pinch-zooms/pans just like every other tool -- this was
+                        // previously only wired up for Pen/Eraser/Move, so zoom silently did
+                        // nothing while Cut was active.
+                        var cutNextPan = pan
+                        var cutNextZoom = zoom
                         if (selectedStrokes.isNotEmpty()) {
                             // A selection already exists: this drag moves it instead of starting
                             // a new lasso.
@@ -644,6 +651,15 @@ private fun NoteCanvas(
                                 val event = awaitPointerEvent()
                                 val pressed = event.changes.filter { it.pressed }
                                 if (pressed.isEmpty()) break
+                                if (pressed.size >= 2) {
+                                    val zoomDelta = calculateZoomDelta(pressed)
+                                    cutNextZoom = (cutNextZoom * zoomDelta).coerceIn(0.5f, 4f)
+                                    cutNextPan += calculatePanDelta(pressed)
+                                    onZoomChange(cutNextZoom)
+                                    onPanChange(cutNextPan)
+                                    lastPoint = toNotePoint(pressed.first().position)
+                                    continue
+                                }
                                 val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
                                 val notePoint = toNotePoint(change.position)
                                 val delta = notePoint - lastPoint
@@ -673,6 +689,14 @@ private fun NoteCanvas(
                                 val event = awaitPointerEvent()
                                 val pressed = event.changes.filter { it.pressed }
                                 if (pressed.isEmpty()) break
+                                if (pressed.size >= 2) {
+                                    val zoomDelta = calculateZoomDelta(pressed)
+                                    cutNextZoom = (cutNextZoom * zoomDelta).coerceIn(0.5f, 4f)
+                                    cutNextPan += calculatePanDelta(pressed)
+                                    onZoomChange(cutNextZoom)
+                                    onPanChange(cutNextPan)
+                                    continue
+                                }
                                 val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
                                 lasso.add(toNotePoint(change.position))
                                 onLassoChange(lasso.toList())
@@ -825,8 +849,22 @@ private fun TodoOnNoteCard(
             .width(placement.widthDp.dp)
             .height(placement.heightDp.dp)
             .pointerInput(placement.fixed, zoom) {
-                detectDragGestures { _, dragAmount ->
-                    if (!placement.fixed) onMoved(placement.todoId, dragAmount.x / zoom, dragAmount.y / zoom)
+                // Consume the down (and every move) ourselves, immediately -- detectDragGestures
+                // only consumes once the drag exceeds touch slop, which was late enough that
+                // NoteCanvas's own gesture (which ignored consumption via requireUnconsumed =
+                // false) still saw an "unconsumed" down on the card and started drawing a stroke
+                // underneath it. Consuming from the first event blocks that at the source.
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                        if (change == null || !change.pressed) break
+                        val dragAmount = change.positionChange()
+                        change.consume()
+                        if (!placement.fixed) onMoved(placement.todoId, dragAmount.x / zoom, dragAmount.y / zoom)
+                    }
                 }
             },
         shape = RoundedCornerShape(8.dp),
@@ -852,10 +890,19 @@ private fun TodoOnNoteCard(
                     .fillMaxWidth()
                     .height(22.dp)
                     .pointerInput(placement.fixed) {
-                        detectDragGestures { _, dragAmount ->
-                            if (!placement.fixed) {
-                                with(density) {
-                                    onResized(todo.id, dragAmount.x.toDp().value, dragAmount.y.toDp().value)
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            down.consume()
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                                if (change == null || !change.pressed) break
+                                val dragAmount = change.positionChange()
+                                change.consume()
+                                if (!placement.fixed) {
+                                    with(density) {
+                                        onResized(todo.id, dragAmount.x.toDp().value, dragAmount.y.toDp().value)
+                                    }
                                 }
                             }
                         }

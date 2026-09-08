@@ -95,6 +95,7 @@ fun FieldNoteApp(viewModel: MainViewModel) {
                             onSyncFolderDisconnected = viewModel::disconnectSyncFolder,
                             onSyncNow = viewModel::syncNow,
                             onClearConflicts = viewModel::clearConflicts,
+                            onConflictPolicyChange = viewModel::setConflictPolicy,
                             onInstallUpdate = viewModel::installUpdate,
                             tabletMode = tabletMode
                         )

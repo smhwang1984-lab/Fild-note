@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -25,6 +26,7 @@ import com.fieldnote.MainUiState
 import com.fieldnote.SyncUiState
 import com.fieldnote.UpdateUiState
 import com.fieldnote.data.FeatureStatus
+import com.fieldnote.data.sync.ConflictPolicy
 import com.fieldnote.ui.navigation.ScreenFrame
 
 @Composable
@@ -37,6 +39,7 @@ fun SettingsScreen(
     onSyncFolderDisconnected: () -> Unit,
     onSyncNow: () -> Unit,
     onClearConflicts: () -> Unit,
+    onConflictPolicyChange: (ConflictPolicy) -> Unit,
     onInstallUpdate: () -> Unit,
     tabletMode: Boolean
 ) {
@@ -55,7 +58,8 @@ fun SettingsScreen(
                         onPickFolder = { folderPickerLauncher.launch(null) },
                         onDisconnect = onSyncFolderDisconnected,
                         onSyncNow = onSyncNow,
-                        onClearConflicts = onClearConflicts
+                        onClearConflicts = onClearConflicts,
+                        onConflictPolicyChange = onConflictPolicyChange
                     )
                     FeatureStatusList(featureStatuses = featureStatuses)
                 }
@@ -69,7 +73,8 @@ fun SettingsScreen(
                     onPickFolder = { folderPickerLauncher.launch(null) },
                     onDisconnect = onSyncFolderDisconnected,
                     onSyncNow = onSyncNow,
-                    onClearConflicts = onClearConflicts
+                    onClearConflicts = onClearConflicts,
+                    onConflictPolicyChange = onConflictPolicyChange
                 )
                 FeatureStatusList(featureStatuses = featureStatuses)
             }
@@ -108,14 +113,10 @@ private fun VersionCard(
         Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
             Text(text = "현재 버전: ${uiState.versionName}", style = MaterialTheme.typography.titleMedium)
             Text(
-                text = updateState.availableVersionName?.let { "새 버전: $it" } ?: "최신 버전을 사용 중입니다",
+                text = updateState.message ?: "동기화 폴더 루트에 update.apk 파일을 두면 동기화할 때마다 자동으로 확인합니다.",
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(text = "대상 기기: ${uiState.targetDevices.joinToString()}", style = MaterialTheme.typography.bodySmall)
-            Text(
-                text = "동기화 폴더 루트에 update.apk 파일을 두면 동기화할 때마다 자동으로 확인합니다.",
-                style = MaterialTheme.typography.bodySmall
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onRefresh) { Text("새로고침") }
                 Button(onClick = onInstallUpdate, enabled = updateState.availableVersionName != null) { Text("업데이트") }
@@ -130,7 +131,8 @@ private fun SyncFolderCard(
     onPickFolder: () -> Unit,
     onDisconnect: () -> Unit,
     onSyncNow: () -> Unit,
-    onClearConflicts: () -> Unit
+    onClearConflicts: () -> Unit,
+    onConflictPolicyChange: (ConflictPolicy) -> Unit
 ) {
     Card(
         shape = RoundedCornerShape(8.dp),
@@ -155,11 +157,25 @@ private fun SyncFolderCard(
                 OutlinedButton(onClick = onSyncNow, enabled = state.folderName != null && !state.syncing) { Text("동기화") }
                 OutlinedButton(onClick = onDisconnect, enabled = state.folderName != null && !state.syncing) { Text("연결 해제") }
             }
+            Text(
+                text = "충돌 시 우선(둘 다 수정된 경우에만 적용, 최신순은 수정 시각 기준)",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ConflictPolicyChip("최신순", state.conflictPolicy == ConflictPolicy.Newest) { onConflictPolicyChange(ConflictPolicy.Newest) }
+                ConflictPolicyChip("이 기기 우선", state.conflictPolicy == ConflictPolicy.Local) { onConflictPolicyChange(ConflictPolicy.Local) }
+                ConflictPolicyChip("Drive 우선", state.conflictPolicy == ConflictPolicy.Remote) { onConflictPolicyChange(ConflictPolicy.Remote) }
+            }
             if (state.conflicts > 0) {
                 OutlinedButton(onClick = onClearConflicts) { Text("충돌 기록 지우기") }
             }
         }
     }
+}
+
+@Composable
+private fun ConflictPolicyChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    AssistChip(onClick = onClick, label = { Text(if (selected) "$label*" else label) })
 }
 
 @Composable

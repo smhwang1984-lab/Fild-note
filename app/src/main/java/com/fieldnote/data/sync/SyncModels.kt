@@ -19,3 +19,15 @@ enum class SyncPhase {
     AuthenticationRequired,
     Error
 }
+
+/** How [FolderSyncManager] should resolve a note/todo that changed on both sides since the last
+ * successful sync. The loser is never discarded -- it's still written to `Conflicts/` -- this
+ * only decides which copy becomes canonical going forward. */
+enum class ConflictPolicy {
+    /** Whichever copy has the later `updatedAt` wins. The default. */
+    Newest,
+    /** This device's copy always wins. */
+    Local,
+    /** The sync folder's copy always wins. */
+    Remote
+}

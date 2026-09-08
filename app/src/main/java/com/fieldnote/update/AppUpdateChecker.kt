@@ -16,6 +16,17 @@ data class UpdateInfo(
     val apkFile: File
 )
 
+/** Result of [AppUpdateChecker.check]. Kept explicit (instead of a nullable [UpdateInfo]) so a
+ * lookup/read failure is never indistinguishable from "no update.apk here" or "already current" --
+ * all three used to collapse to the same silent null, which made a real problem (wrong filename,
+ * folder permission hiccup, corrupt copy, ...) look identical to "nothing to do." */
+sealed class UpdateCheckResult {
+    data class Available(val info: UpdateInfo) : UpdateCheckResult()
+    data object NotFound : UpdateCheckResult()
+    data class UpToDate(val versionName: String) : UpdateCheckResult()
+    data class Failed(val message: String) : UpdateCheckResult()
+}
+
 /**
  * Looks for a fixed-name `update.apk` at the root of the user's sync folder (next to `Notes/`,
  * `Todos/`, `Conflicts/`) and offers it as an install if its version is newer than what's
@@ -25,32 +36,38 @@ data class UpdateInfo(
 object AppUpdateChecker {
     private const val UPDATE_FILE_NAME = "update.apk"
 
-    /** Returns update info if a newer update.apk is present at the sync folder root, else null. */
-    fun check(context: Context, rootTreeUri: Uri): UpdateInfo? {
+    fun check(context: Context, rootTreeUri: Uri): UpdateCheckResult {
         val appContext = context.applicationContext
-        val store = SafFileStore(appContext)
-        val root = store.rootFolder(rootTreeUri)
-        val remoteApk = store.findFile(root, UPDATE_FILE_NAME) ?: return null
+        return try {
+            val store = SafFileStore(appContext)
+            val root = store.rootFolder(rootTreeUri)
+            // Case/whitespace-insensitive: SAF providers (Drive included) preserve whatever name
+            // was typed on whichever device uploaded the file, and a strict exact-name lookup
+            // silently found nothing for anything but a perfect match.
+            val remoteApk = store.findFile(root, UPDATE_FILE_NAME)
+                ?: return UpdateCheckResult.NotFound
 
-        val updatesDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
-        val localApk = File(updatesDir, UPDATE_FILE_NAME)
-        store.copyToLocalFile(remoteApk, localApk)
+            val updatesDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
+            val localApk = File(updatesDir, UPDATE_FILE_NAME)
+            store.copyToLocalFile(remoteApk, localApk)
 
-        val packageInfo = appContext.packageManager.getPackageArchiveInfo(localApk.absolutePath, 0)
-        if (packageInfo == null) {
-            localApk.delete()
-            return null
+            val packageInfo = appContext.packageManager.getPackageArchiveInfo(localApk.absolutePath, 0)
+            if (packageInfo == null) {
+                localApk.delete()
+                return UpdateCheckResult.Failed("update.apk 파일을 읽을 수 없습니다(손상되었거나 올바른 APK가 아님).")
+            }
+            val candidateVersionCode = packageInfo.longVersionCodeCompat()
+            val candidateVersionName = packageInfo.versionName ?: "?"
+            if (candidateVersionCode <= BuildConfig.VERSION_CODE.toLong()) {
+                localApk.delete()
+                return UpdateCheckResult.UpToDate(candidateVersionName)
+            }
+            UpdateCheckResult.Available(
+                UpdateInfo(versionName = candidateVersionName, versionCode = candidateVersionCode, apkFile = localApk)
+            )
+        } catch (error: Exception) {
+            UpdateCheckResult.Failed(error.message ?: "업데이트 확인 중 오류가 발생했습니다.")
         }
-        val candidateVersionCode = packageInfo.longVersionCodeCompat()
-        if (candidateVersionCode <= BuildConfig.VERSION_CODE.toLong()) {
-            localApk.delete()
-            return null
-        }
-        return UpdateInfo(
-            versionName = packageInfo.versionName ?: "?",
-            versionCode = candidateVersionCode,
-            apkFile = localApk
-        )
     }
 
     /** Intent that opens the system package installer for [apkFile], via this app's FileProvider. */

@@ -39,3 +39,20 @@ class SafSessionStore(context: Context) {
         prefs.edit().clear().apply()
     }
 }
+
+/** The user's conflict-resolution preference (see [ConflictPolicy]). Kept in its own prefs file,
+ * separate from [SafSessionStore], so disconnecting/reconnecting a sync folder doesn't reset it. */
+class SyncSettingsStore(context: Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("sync_settings", Context.MODE_PRIVATE)
+
+    var conflictPolicy: ConflictPolicy
+        get() = runCatching { ConflictPolicy.valueOf(prefs.getString(KEY_CONFLICT_POLICY, null) ?: "") }
+            .getOrDefault(ConflictPolicy.Newest)
+        set(value) {
+            prefs.edit().putString(KEY_CONFLICT_POLICY, value.name).apply()
+        }
+
+    private companion object {
+        const val KEY_CONFLICT_POLICY = "conflict_policy"
+    }
+}

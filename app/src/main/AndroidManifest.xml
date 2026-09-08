@@ -1,5 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- No INTERNET permission needed: sync goes through the SAF content:// tree the user picks
+         (ActivityResultContracts.OpenDocumentTree), so any network I/O happens inside the app
+         that backs that folder (e.g. Google Drive), not this process. ACCESS_NETWORK_STATE is
+         still required for WorkManager's NetworkType.CONNECTED sync constraint. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application
         android:allowBackup="true"

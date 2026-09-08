@@ -7,5 +7,5 @@ import com.fieldnote.data.sync.SyncSnapshot
 import com.fieldnote.data.sync.SyncStatusMonitor
 
 @Composable
-fun rememberDriveSyncStatus(): State<SyncSnapshot> =
+fun rememberSyncStatus(): State<SyncSnapshot> =
     SyncStatusMonitor.status.collectAsState()

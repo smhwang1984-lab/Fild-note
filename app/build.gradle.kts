@@ -21,8 +21,8 @@ android {
         applicationId = "com.fieldnote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.0.7"
+        versionCode = 9
+        versionName = "1.1.0"
     }
 
     signingConfigs {
@@ -74,14 +74,14 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics:1.6.8")
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.8")
     implementation("androidx.compose.material3:material3:1.2.1")
-    implementation("com.google.android.gms:play-services-auth:21.6.0")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Storage Access Framework: DocumentFile wraps the SAF content:// tree the user picks via
+    // ActivityResultContracts.OpenDocumentTree() (e.g. a folder inside their Google Drive app).
+    implementation("androidx.documentfile:documentfile:1.0.1")
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.8")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     // android.jar's org.json classes are stubs that throw at runtime in plain JVM unit tests;
-    // pull in the real implementation so DriveRestClient's JSON parsing actually runs.
+    // pull in the real implementation so FolderSyncManager's JSON parsing actually runs.
     testImplementation("org.json:json:20240303")
 }
 

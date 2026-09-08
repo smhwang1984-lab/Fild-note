@@ -1,6 +1,7 @@
 package com.fieldnote.data.sync
 
 import android.content.Context
+import android.net.Uri
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -14,34 +15,41 @@ import com.fieldnote.data.LocalNoteStore
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class DriveSyncWorker(
+/** True if this app still holds a persisted read+write grant for [uri]. */
+fun Context.hasPersistedSyncPermission(uri: Uri): Boolean =
+    contentResolver.persistedUriPermissions.any {
+        it.uri == uri && it.isReadPermission && it.isWritePermission
+    }
+
+class SafSyncWorker(
     appContext: Context,
     params: WorkerParameters
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        val session = DriveSessionStore(applicationContext)
-        if (!session.connected) return Result.success()
+        val session = SafSessionStore(applicationContext)
+        val treeUriString = session.treeUri ?: return Result.success()
+        val treeUri = Uri.parse(treeUriString)
         return try {
-            val token = GoogleDriveAuthorization(applicationContext).silentToken()
-            if (token == null) {
+            if (!applicationContext.hasPersistedSyncPermission(treeUri)) {
                 SyncStatusMonitor.update(
                     SyncSnapshot(
                         phase = SyncPhase.AuthenticationRequired,
-                        message = "설정 화면에서 Google Drive를 다시 연결하세요.",
+                        message = "동기화 폴더 접근 권한이 사라졌습니다. 설정에서 폴더를 다시 선택하세요.",
                         lastSyncedAt = session.lastSyncedAt,
                         pendingChanges = LocalNoteStore.get(applicationContext).pendingCount()
                     )
                 )
                 Result.failure()
             } else {
-                DriveSyncManager(applicationContext).sync(token, session.accountEmail)
+                FolderSyncManager(applicationContext).sync(treeUri)
+                session.markSynced(System.currentTimeMillis())
                 Result.success()
             }
         } catch (error: IOException) {
             SyncStatusMonitor.update(
                 SyncSnapshot(
                     phase = SyncPhase.Offline,
-                    message = "오프라인 상태입니다. 변경 사항은 이 기기에 안전하게 저장되어 있습니다.",
+                    message = "폴더에 접근할 수 없습니다(오프라인일 수 있음). 변경 사항은 이 기기에 안전하게 저장되어 있습니다.",
                     lastSyncedAt = session.lastSyncedAt,
                     pendingChanges = LocalNoteStore.get(applicationContext).pendingCount(),
                     conflicts = LocalNoteStore.get(applicationContext).conflictCount()
@@ -52,7 +60,7 @@ class DriveSyncWorker(
             SyncStatusMonitor.update(
                 SyncSnapshot(
                     phase = SyncPhase.Error,
-                    message = error.message ?: "Drive 동기화에 실패했습니다.",
+                    message = error.message ?: "동기화에 실패했습니다.",
                     lastSyncedAt = session.lastSyncedAt,
                     pendingChanges = LocalNoteStore.get(applicationContext).pendingCount(),
                     conflicts = LocalNoteStore.get(applicationContext).conflictCount()
@@ -68,7 +76,7 @@ object SyncScheduler {
     private const val PERIODIC = "fieldnote-drive-periodic-sync"
 
     fun enqueue(context: Context) {
-        val request = OneTimeWorkRequestBuilder<DriveSyncWorker>()
+        val request = OneTimeWorkRequestBuilder<SafSyncWorker>()
             .setConstraints(networkConstraints())
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
@@ -79,7 +87,7 @@ object SyncScheduler {
     }
 
     fun ensurePeriodic(context: Context) {
-        val request = PeriodicWorkRequestBuilder<DriveSyncWorker>(15, TimeUnit.MINUTES)
+        val request = PeriodicWorkRequestBuilder<SafSyncWorker>(15, TimeUnit.MINUTES)
             .setConstraints(networkConstraints())
             .build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(

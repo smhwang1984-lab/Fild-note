@@ -28,6 +28,8 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
@@ -89,6 +91,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val todos = mutableStateListOf<TodoItem>()
     val noteTodoPlacements = mutableStateListOf<NoteTodoPlacement>()
+
+    // Debounces the sync trigger while pen strokes keep calling saveNoteContent() in quick
+    // succession, so a drawing session enqueues one sync shortly after the user pauses instead
+    // of one per stroke.
+    private var syncDebounceJob: Job? = null
 
     init {
         reloadFromDatabase()
@@ -312,7 +319,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 conflicts = localStore.conflictCount()
             )
         )
-        if (session.connected) SyncScheduler.enqueue(getApplication())
+        if (session.connected) {
+            syncDebounceJob?.cancel()
+            syncDebounceJob = viewModelScope.launch {
+                delay(1200)
+                SyncScheduler.enqueue(getApplication())
+            }
+        }
+    }
+
+    /** Clears the conflict backlog without touching note/todo content -- for a stuck count left
+     * over from a since-fixed sync race, once the user has confirmed the current content is fine. */
+    fun clearConflicts() {
+        localStore.resolveAllConflicts()
+        val snapshot = SyncSnapshot(
+            phase = syncState.phase.takeUnless { it == SyncPhase.Conflict } ?: SyncPhase.Idle,
+            message = "충돌 기록을 지웠습니다.",
+            lastSyncedAt = session.lastSyncedAt,
+            pendingChanges = localStore.pendingCount(),
+            conflicts = 0
+        )
+        SyncStatusMonitor.update(snapshot)
+        applySyncSnapshot(snapshot)
     }
 
     private fun reloadFromDatabase() {

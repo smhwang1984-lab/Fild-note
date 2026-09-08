@@ -228,6 +228,16 @@ class LocalNoteStore private constructor(context: Context) :
         "SELECT COUNT(*) FROM sync_conflicts WHERE resolved=0", null
     ).use { it.moveToFirst(); it.getInt(0) }
 
+    /** Marks every outstanding conflict as resolved. Does not touch note/todo content -- use
+     * this once the user has confirmed the local copy (already the one that keeps syncing) is
+     * fine, to clear a backlog left over from before a sync-race fix. */
+    @Synchronized
+    fun resolveAllConflicts() {
+        writableDatabase.update("sync_conflicts", ContentValues().apply {
+            put("resolved", 1)
+        }, "resolved = 0", null)
+    }
+
     private fun insertSeedTodo(
         db: SQLiteDatabase,
         id: Long,

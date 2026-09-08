@@ -93,6 +93,7 @@ fun FieldNoteApp(viewModel: MainViewModel) {
                             onSyncFolderPicked = viewModel::onSyncFolderPicked,
                             onSyncFolderDisconnected = viewModel::disconnectSyncFolder,
                             onSyncNow = viewModel::syncNow,
+                            onClearConflicts = viewModel::clearConflicts,
                             tabletMode = tabletMode
                         )
                     }

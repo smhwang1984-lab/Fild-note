@@ -7,6 +7,8 @@ import com.fieldnote.data.NoteRecord
 import com.fieldnote.data.TodoRecord
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -23,7 +25,17 @@ class FolderSyncManager(context: Context) {
     private val local = LocalNoteStore.get(appContext)
     private val store = SafFileStore(appContext)
 
-    suspend fun sync(rootTreeUri: Uri): SyncResult = withContext(Dispatchers.IO) {
+    suspend fun sync(rootTreeUri: Uri): SyncResult = mutex.withLock {
+        syncLocked(rootTreeUri)
+    }
+
+    // A manual "동기화" tap (from the ViewModel) and a WorkManager-triggered run can both call
+    // sync() around the same time. Without this, two passes reading/writing the same
+    // LocalNoteStore rows and remote files concurrently could race -- one pass's remote write
+    // landing before the other's "last synced" bookkeeping update -- which looks exactly like a
+    // real two-writer conflict. A process-wide lock (shared by every FolderSyncManager instance,
+    // since each caller constructs its own) makes sync passes queue up instead of interleaving.
+    private suspend fun syncLocked(rootTreeUri: Uri): SyncResult = withContext(Dispatchers.IO) {
         local.ensureSeedData()
         SyncStatusMonitor.update(
             SyncSnapshot(
@@ -219,4 +231,8 @@ class FolderSyncManager(context: Context) {
     )
 
     private fun parseTime(value: String): Long = Instant.parse(value).toEpochMilli()
+
+    companion object {
+        private val mutex = Mutex()
+    }
 }

@@ -34,6 +34,7 @@ fun SettingsScreen(
     onSyncFolderPicked: (Uri) -> Unit,
     onSyncFolderDisconnected: () -> Unit,
     onSyncNow: () -> Unit,
+    onClearConflicts: () -> Unit,
     tabletMode: Boolean
 ) {
     val folderPickerLauncher = rememberLauncherForActivityResult(
@@ -50,7 +51,8 @@ fun SettingsScreen(
                         state = syncState,
                         onPickFolder = { folderPickerLauncher.launch(null) },
                         onDisconnect = onSyncFolderDisconnected,
-                        onSyncNow = onSyncNow
+                        onSyncNow = onSyncNow,
+                        onClearConflicts = onClearConflicts
                     )
                     FeatureStatusList(featureStatuses = featureStatuses)
                 }
@@ -63,7 +65,8 @@ fun SettingsScreen(
                     state = syncState,
                     onPickFolder = { folderPickerLauncher.launch(null) },
                     onDisconnect = onSyncFolderDisconnected,
-                    onSyncNow = onSyncNow
+                    onSyncNow = onSyncNow,
+                    onClearConflicts = onClearConflicts
                 )
                 FeatureStatusList(featureStatuses = featureStatuses)
             }
@@ -111,7 +114,8 @@ private fun SyncFolderCard(
     state: SyncUiState,
     onPickFolder: () -> Unit,
     onDisconnect: () -> Unit,
-    onSyncNow: () -> Unit
+    onSyncNow: () -> Unit,
+    onClearConflicts: () -> Unit
 ) {
     Card(
         shape = RoundedCornerShape(8.dp),
@@ -135,6 +139,9 @@ private fun SyncFolderCard(
                 }
                 OutlinedButton(onClick = onSyncNow, enabled = state.folderName != null && !state.syncing) { Text("동기화") }
                 OutlinedButton(onClick = onDisconnect, enabled = state.folderName != null && !state.syncing) { Text("연결 해제") }
+            }
+            if (state.conflicts > 0) {
+                OutlinedButton(onClick = onClearConflicts) { Text("충돌 기록 지우기") }
             }
         }
     }

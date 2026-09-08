@@ -79,9 +79,15 @@ object SyncScheduler {
         val request = OneTimeWorkRequestBuilder<SafSyncWorker>()
             .setConstraints(networkConstraints())
             .build()
+        // APPEND_OR_REPLACE (not REPLACE): REPLACE cancels a sync that's already running, which
+        // let a fast burst of saves (e.g. every pen stroke) tear down an in-flight sync mid-way
+        // -- the remote file could already be written while the local "last synced" bookkeeping
+        // never got updated, so the next pass saw its own delayed upload as a foreign change and
+        // logged a false conflict. Appending instead queues a follow-up run after the current one
+        // finishes, so no in-flight sync is ever interrupted.
         WorkManager.getInstance(context).enqueueUniqueWork(
             IMMEDIATE,
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
             request
         )
     }

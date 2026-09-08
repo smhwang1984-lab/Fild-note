@@ -20,6 +20,8 @@ import com.fieldnote.data.sync.DriveFolderRegistry
 import com.fieldnote.data.sync.DriveSessionStore
 import com.fieldnote.data.sync.DriveSyncManager
 import com.fieldnote.data.sync.GoogleDriveAuthorization
+import com.fieldnote.data.sync.SyncDiagnostics
+import com.fieldnote.data.sync.SyncDiagnosticsProvider
 import com.fieldnote.data.sync.SyncPhase
 import com.fieldnote.data.sync.SyncScheduler
 import com.fieldnote.data.sync.SyncSnapshot
@@ -77,7 +79,7 @@ data class GoogleSyncState(
     val phase: SyncPhase = SyncPhase.Idle,
     val pendingChanges: Int = 0,
     val conflicts: Int = 0,
-    val message: String = "Connect a Google account."
+    val message: String = "Google 계정을 연결하세요."
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -123,19 +125,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         googleSyncState = googleSyncState.copy(
             authorizing = true,
             phase = SyncPhase.Syncing,
-            message = "Requesting Google Drive access..."
+            message = "Google Drive 접근을 요청하는 중..."
         )
         viewModelScope.launch {
             try {
-                val existingEmail = session.accountEmail
-                if (existingEmail != null) {
-                    authorization.revoke(activity, existingEmail)
-                    clearDriveConnection()
-                    googleSyncState = googleSyncState.copy(
-                        authorizing = true,
-                        phase = SyncPhase.Syncing,
-                        message = "Requesting Google Drive access..."
-                    )
+                // 계정을 바꿀 때 이전 계정의 Drive 접근을 여기서 revoke하지 않는다.
+                // drive.file 스코프는 파일 단위 권한이라 revoke하면 기존
+                // MyNoteApp 폴더/파일에 대한 접근이 영구히 사라지고, 재승인해도
+                // files.list가 빈 결과를 돌려줘 폴더가 중복 생성된다. 로컬 세션만
+                // 비우고 재승인하면 DriveSyncManager.sync()가 계정 이메일을 비교해
+                // 필요할 때만 폴더 캐시를 폐기한다.
+                if (session.accountEmail != null) {
+                    session.clear()
                 }
                 requestAuthorization(activity, launchResolution)
             } catch (error: TimeoutCancellationException) {
@@ -156,10 +157,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun disconnectGoogleAccount(activity: Activity) {
+    // revokeAccess = false(기본값): 이 기기에서 로컬 연결 정보만 지운다. Drive에 만든
+    // MyNoteApp 폴더의 권한은 그대로 남으므로 나중에 같은 계정으로 다시 연결하면
+    // 기존 파일을 이어서 쓴다.
+    // revokeAccess = true: Google 계정 자체에서 앱의 Drive 접근 권한을 취소한다.
+    // drive.file은 파일 단위 권한이라 취소하면 MyNoteApp 폴더에 대한 접근이
+    // 영구히 사라져서, 이후 재연결 시 새 폴더가 만들어진다. 사용자가 명시적으로
+    // 요청했을 때만 호출해야 한다.
+    fun disconnectGoogleAccount(activity: Activity, revokeAccess: Boolean = false) {
         if (googleSyncState.authorizing) return
         val email = session.accountEmail
-        if (email == null) {
+        if (email == null || !revokeAccess) {
             clearDriveConnection()
             return
         }
@@ -173,7 +181,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 clearDriveConnection()
                 googleSyncState = googleSyncState.copy(
                     phase = SyncPhase.Error,
-                    message = "Local connection cleared, but Google access could not be revoked."
+                    message = "로컬 연결은 해제됐지만 Google 접근 권한 취소에는 실패했습니다."
                 )
             }
         }
@@ -181,13 +189,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun clearDriveConnection() {
         session.clear()
+        // 마커 기반 폴더 조회(DriveFolderRegistry/DriveRestClient)는 항상 기존
+        // 폴더를 먼저 찾으므로 캐시를 비워도 중복 폴더가 생기지 않는다.
         DriveFolderRegistry(getApplication()).clear()
         SyncScheduler.cancel(getApplication())
-        googleSyncState = GoogleSyncState(message = "Google Drive disconnected. Local data is unchanged.")
+        googleSyncState = GoogleSyncState(message = "Google Drive 연결이 해제됐습니다. 기기의 데이터는 그대로입니다.")
         SyncStatusMonitor.update(
             SyncSnapshot(
                 phase = SyncPhase.AuthenticationRequired,
-                message = "Google Drive disconnected. Local data is unchanged.",
+                message = "Google Drive 연결이 해제됐습니다. 기기의 데이터는 그대로입니다.",
                 pendingChanges = localStore.pendingCount(),
                 conflicts = localStore.conflictCount()
             )
@@ -200,11 +210,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         val result = authorization.authorize(activity)
         if (result.hasResolution()) {
-            val pendingIntent = checkNotNull(result.pendingIntent) { "Missing OAuth resolution." }
-            googleSyncState = googleSyncState.copy(message = "Waiting for Google account permission...")
+            val pendingIntent = checkNotNull(result.pendingIntent) { "OAuth 처리 결과(pendingIntent)가 없습니다." }
+            googleSyncState = googleSyncState.copy(message = "Google 계정 권한 승인을 기다리는 중...")
             launchResolution(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
         } else {
-            finishAuthorization(checkNotNull(result.accessToken) { "Missing OAuth token." })
+            finishAuthorization(checkNotNull(result.accessToken) { "OAuth 액세스 토큰이 없습니다." })
         }
     }
 
@@ -213,7 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!session.connected) {
             googleSyncState = googleSyncState.copy(
                 phase = SyncPhase.AuthenticationRequired,
-                message = "Connect a Google account first."
+                message = "먼저 Google 계정을 연결하세요."
             )
             return
         }
@@ -223,7 +233,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (token == null) {
                     googleSyncState = googleSyncState.copy(
                         phase = SyncPhase.AuthenticationRequired,
-                        message = "Google permission is required again."
+                        message = "Google 권한을 다시 승인해야 합니다."
                     )
                     return@launch
                 }
@@ -234,6 +244,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    /** Snapshot for the settings-screen diagnostics panel: package name, signing SHA-1, cached
+     * folder ids. Compare against the Android OAuth client registered in Google Cloud Console. */
+    fun collectDiagnostics(): SyncDiagnostics = SyncDiagnosticsProvider.collect(getApplication())
 
     fun saveNoteContent(content: String) {
         currentNote = localStore.saveNote(currentNote.id, currentNote.title, content).toDocument()
@@ -306,19 +320,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishAuthorization(accessToken: String) {
         googleSyncState = googleSyncState.copy(
             authorizing = true,
-            message = "Google access granted. Connecting Drive..."
+            message = "Google 접근 승인 완료. Drive에 연결하는 중..."
         )
         viewModelScope.launch {
             try {
+                // DriveSyncManager.sync()가 이메일 확인 직후 session.connect(email)를
+                // 호출하므로 여기서 다시 연결할 필요가 없다. sync가 예외 없이
+                // 끝났다면 session.accountEmail은 항상 채워져 있다.
                 syncManager.sync(accessToken)
-                val email = requireNotNull(session.accountEmail)
-                session.connect(email)
+                val email = session.accountEmail
                 SyncScheduler.ensurePeriodic(getApplication())
                 reloadFromDatabase()
                 googleSyncState = googleSyncState.copy(
                     accountName = email,
                     syncEnabled = true,
-                    message = "Google Drive connected."
+                    message = "Google Drive에 연결됐습니다."
                 )
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -332,14 +348,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun authorizationFailed(error: Throwable) {
         val message = when {
             error is TimeoutCancellationException ->
-                "Google did not respond within 30 seconds. Check your network and Google Play services, then try again."
+                "Google이 30초 안에 응답하지 않았습니다. 네트워크와 Google Play 서비스를 확인한 뒤 다시 시도하세요."
             error is ApiException && error.statusCode == CommonStatusCodes.DEVELOPER_ERROR ->
-                "Google OAuth error 10: check the Android OAuth package name and signing SHA-1 in Google Cloud."
+                "Google OAuth 오류 10: 설정 화면의 진단 정보에 표시되는 패키지명·SHA-1이 " +
+                    "Google Cloud의 Android OAuth 클라이언트 등록값과 일치하는지 확인하세요."
             error is ApiException && error.statusCode == CommonStatusCodes.CANCELED ->
-                "Google sign-in was canceled. Please try again."
+                "Google 로그인이 취소됐습니다. 다시 시도해 주세요."
+            error is ApiException && error.statusCode == CommonStatusCodes.SIGN_IN_REQUIRED ->
+                "Google 계정 로그인이 필요합니다. 기기의 Google 계정 상태를 확인하세요."
+            error is ApiException && error.statusCode == CommonStatusCodes.NETWORK_ERROR ->
+                "네트워크 오류로 Google 인증에 실패했습니다. 연결 상태를 확인하세요."
             error is ApiException ->
-                "Google authorization error ${error.statusCode}: ${error.message ?: CommonStatusCodes.getStatusCodeString(error.statusCode)}"
-            else -> error.message ?: "Google authorization failed."
+                "Google 인증 오류 ${error.statusCode}: ${error.message ?: CommonStatusCodes.getStatusCodeString(error.statusCode)}"
+            else -> error.message ?: "Google 인증에 실패했습니다."
         }
         googleSyncState = googleSyncState.copy(
             authorizing = false,
@@ -351,7 +372,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncFailed(error: Throwable) {
         val snapshot = SyncSnapshot(
             phase = SyncPhase.Error,
-            message = error.message ?: "Drive sync failed.",
+            message = error.message ?: "Drive 동기화에 실패했습니다.",
             lastSyncedAt = session.lastSyncedAt,
             pendingChanges = localStore.pendingCount(),
             conflicts = localStore.conflictCount()
@@ -372,7 +393,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val pending = localStore.pendingCount()
         googleSyncState = googleSyncState.copy(
             pendingChanges = pending,
-            message = if (session.connected) "Local changes queued for Drive." else "Saved offline on this device."
+            message = if (session.connected) "변경 사항이 Drive 업로드 대기 중입니다." else "이 기기에 오프라인으로 저장됐습니다."
         )
         SyncStatusMonitor.update(
             SyncSnapshot(
@@ -421,7 +442,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastSyncedAt = session.lastSyncedAt?.let(::formatTime),
         pendingChanges = localStore.pendingCount(),
         conflicts = localStore.conflictCount(),
-        message = if (session.connected) "Restored Google Drive connection." else "Connect a Google account."
+        message = if (session.connected) "Google Drive 연결 정보를 복원했습니다." else "Google 계정을 연결하세요."
     )
 
     private fun applySyncSnapshot(snapshot: SyncSnapshot) {

@@ -94,6 +94,7 @@ fun FieldNoteApp(viewModel: MainViewModel) {
                             onGoogleAuthorizationCompleted = viewModel::completeGoogleAuthorization,
                             onGoogleAccountDisconnected = viewModel::disconnectGoogleAccount,
                             onSyncNow = viewModel::syncNow,
+                            onCollectDiagnostics = viewModel::collectDiagnostics,
                             tabletMode = tabletMode
                         )
                     }

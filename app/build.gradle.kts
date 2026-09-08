@@ -21,8 +21,8 @@ android {
         applicationId = "com.fieldnote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.0.5"
+        versionCode = 7
+        versionName = "1.0.6"
     }
 
     signingConfigs {
@@ -78,6 +78,10 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.8")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // android.jar's org.json classes are stubs that throw at runtime in plain JVM unit tests;
+    // pull in the real implementation so DriveRestClient's JSON parsing actually runs.
+    testImplementation("org.json:json:20240303")
 }
 
 

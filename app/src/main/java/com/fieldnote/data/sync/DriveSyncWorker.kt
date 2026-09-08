@@ -27,7 +27,7 @@ class DriveSyncWorker(
                 SyncStatusMonitor.update(
                     SyncSnapshot(
                         phase = SyncPhase.AuthenticationRequired,
-                        message = "Open settings and reconnect Google Drive.",
+                        message = "설정 화면에서 Google Drive를 다시 연결하세요.",
                         lastSyncedAt = session.lastSyncedAt,
                         pendingChanges = LocalNoteStore.get(applicationContext).pendingCount()
                     )
@@ -41,7 +41,7 @@ class DriveSyncWorker(
             SyncStatusMonitor.update(
                 SyncSnapshot(
                     phase = SyncPhase.Offline,
-                    message = "Offline. Changes remain safely stored on this device.",
+                    message = "오프라인 상태입니다. 변경 사항은 이 기기에 안전하게 저장되어 있습니다.",
                     lastSyncedAt = session.lastSyncedAt,
                     pendingChanges = LocalNoteStore.get(applicationContext).pendingCount(),
                     conflicts = LocalNoteStore.get(applicationContext).conflictCount()
@@ -52,7 +52,7 @@ class DriveSyncWorker(
             SyncStatusMonitor.update(
                 SyncSnapshot(
                     phase = SyncPhase.Error,
-                    message = error.message ?: "Drive sync failed.",
+                    message = error.message ?: "Drive 동기화에 실패했습니다.",
                     lastSyncedAt = session.lastSyncedAt,
                     pendingChanges = LocalNoteStore.get(applicationContext).pendingCount(),
                     conflicts = LocalNoteStore.get(applicationContext).conflictCount()

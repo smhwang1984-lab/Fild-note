@@ -2,7 +2,7 @@ package com.fieldnote.data.sync
 
 data class SyncSnapshot(
     val phase: SyncPhase = SyncPhase.Idle,
-    val message: String = "Connect a Google account.",
+    val message: String = "Google 계정을 연결하세요.",
     val lastSyncedAt: Long? = null,
     val pendingChanges: Int = 0,
     val conflicts: Int = 0

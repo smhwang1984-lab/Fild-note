@@ -6,6 +6,7 @@ import com.fieldnote.data.NoteRecord
 import com.fieldnote.data.TodoRecord
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -16,6 +17,7 @@ class DriveSyncManager(context: Context) {
     private val local = LocalNoteStore.get(appContext)
     private val folders = DriveFolderRegistry(appContext)
     private val session = DriveSessionStore(appContext)
+    private val authorization = GoogleDriveAuthorization(appContext)
 
     suspend fun sync(accessToken: String, expectedEmail: String? = null): SyncResult =
         withContext(Dispatchers.IO) {
@@ -23,25 +25,30 @@ class DriveSyncManager(context: Context) {
             SyncStatusMonitor.update(
                 SyncSnapshot(
                     phase = SyncPhase.Syncing,
-                    message = "Syncing changed items...",
+                    message = "변경된 항목을 동기화하는 중...",
                     lastSyncedAt = session.lastSyncedAt,
                     pendingChanges = local.pendingCount(),
                     conflicts = local.conflictCount()
                 )
             )
-            val drive = DriveRestClient(accessToken)
+            // The access token from OAuth expires in about an hour. If a request comes back
+            // 401 mid-sync, DriveRestClient calls this once to get a fresh token silently
+            // (already on Dispatchers.IO here, so a blocking wait for the Task is fine) instead
+            // of failing the whole sync.
+            val drive = DriveRestClient(accessToken, refreshToken = {
+                runBlocking { authorization.silentToken() }
+            })
             val email = drive.currentUserEmail()
             if (expectedEmail != null && !email.equals(expectedEmail, ignoreCase = true)) {
-                throw IllegalStateException("The authorized Google account changed.")
-            }
-            if (session.accountEmail != null &&
-                !email.equals(session.accountEmail, ignoreCase = true)
-            ) {
-                folders.clear()
+                throw IllegalStateException("승인된 Google 계정이 바뀌었습니다.")
             }
             session.connect(email)
-            val notesFolder = folders.ensureNotes(drive)
-            val todosFolder = folders.ensureTodos(drive)
+            // ensureNotes/ensureTodos resolve folders by their Drive appProperties marker and
+            // are tagged per-account, so switching accounts (or a stale local cache) never
+            // reuses another account's folder id -- each marker re-resolves for `email` on its
+            // own instead of relying on a blanket cache wipe here.
+            val notesFolder = folders.ensureNotes(drive, email)
+            val todosFolder = folders.ensureTodos(drive, email)
             val notesResult = syncNotes(drive, notesFolder)
             val todosResult = syncTodos(drive, todosFolder)
             val result = SyncResult(
@@ -56,9 +63,9 @@ class DriveSyncManager(context: Context) {
                 SyncSnapshot(
                     phase = phase,
                     message = if (phase == SyncPhase.Conflict) {
-                        "Sync completed with conflicts. Local and Drive copies were preserved."
+                        "충돌이 있는 채로 동기화를 마쳤습니다. 로컬과 Drive 사본을 모두 보존했습니다."
                     } else {
-                        "Sync complete."
+                        "동기화 완료."
                     },
                     lastSyncedAt = now,
                     pendingChanges = local.pendingCount(),
@@ -69,7 +76,10 @@ class DriveSyncManager(context: Context) {
         }
 
     suspend fun ensureAttachmentsFolder(accessToken: String): String = withContext(Dispatchers.IO) {
-        folders.ensureAttachments(DriveRestClient(accessToken))
+        val drive = DriveRestClient(accessToken, refreshToken = {
+            runBlocking { authorization.silentToken() }
+        })
+        folders.ensureAttachments(drive, drive.currentUserEmail())
     }
 
     private fun syncNotes(drive: DriveRestClient, folderId: String): SyncResult {

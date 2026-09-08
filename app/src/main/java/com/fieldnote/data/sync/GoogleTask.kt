@@ -16,11 +16,11 @@ internal suspend fun <T> Task<T>.awaitGoogleTask(): T = withTimeout(30_000L) {
             if (!continuation.isActive) return@addOnCompleteListener
             when {
                 task.isCanceled -> continuation.resumeWithException(
-                    IllegalStateException("Google authorization request was canceled. Please try again.")
+                    IllegalStateException("Google 인증 요청이 취소됐습니다. 다시 시도해 주세요.")
                 )
                 task.isSuccessful -> continuation.resume(task.result)
                 else -> continuation.resumeWithException(
-                    task.exception ?: IllegalStateException("Google authorization failed.")
+                    task.exception ?: IllegalStateException("Google 인증에 실패했습니다.")
                 )
             }
         }

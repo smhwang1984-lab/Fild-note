@@ -20,7 +20,7 @@ class GoogleDriveAuthorization(private val context: Context) {
             .awaitGoogleTask()
 
     fun tokenFromResult(intent: Intent?): String {
-        checkNotNull(intent) { "Google sign-in was canceled or returned no result. Please try again." }
+        checkNotNull(intent) { "Google 로그인이 취소되었거나 결과가 없습니다. 다시 시도해 주세요." }
         return Identity.getAuthorizationClient(context)
             .getAuthorizationResultFromIntent(intent)
             .requireToken()
@@ -44,13 +44,15 @@ class GoogleDriveAuthorization(private val context: Context) {
     }
 
     private fun AuthorizationResult.requireToken(): String =
-        accessToken ?: throw IllegalStateException("Google did not return an access token.")
+        accessToken ?: throw IllegalStateException("Google이 액세스 토큰을 반환하지 않았습니다.")
 
     companion object {
+        // drive.file 하나만 요청한다. 이 범위는 앱이 만든 파일/폴더에만 적용되며
+        // drive/v3/about 호출로 사용자 이메일도 함께 얻을 수 있어 openid나
+        // userinfo.email 스코프가 필요 없다. 스코프를 줄이면 동의 화면 구성이
+        // 단순해지고 승인 실패 가능성도 줄어든다.
         private val SCOPES = listOf(
-            Scope("https://www.googleapis.com/auth/drive.file"),
-            Scope("openid"),
-            Scope("https://www.googleapis.com/auth/userinfo.email")
+            Scope("https://www.googleapis.com/auth/drive.file")
         )
     }
 }

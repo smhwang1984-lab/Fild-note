@@ -32,6 +32,7 @@ class FolderSyncManager(context: Context) {
     private val appContext = context.applicationContext
     private val local = LocalNoteStore.get(appContext)
     private val store = SafFileStore(appContext)
+    private val settings = SyncSettingsStore(appContext)
 
     suspend fun sync(rootTreeUri: Uri): SyncResult = mutex.withLock {
         syncLocked(rootTreeUri)
@@ -57,8 +58,9 @@ class FolderSyncManager(context: Context) {
         val notesFolder = store.childFolder(root, "Notes")
         val todosFolder = store.childFolder(root, "Todos")
         val conflictsFolder = store.childFolder(root, "Conflicts")
-        val notesResult = syncNotes(notesFolder, conflictsFolder)
-        val todosResult = syncTodos(todosFolder, conflictsFolder)
+        val policy = settings.conflictPolicy
+        val notesResult = syncNotes(notesFolder, conflictsFolder, policy)
+        val todosResult = syncTodos(todosFolder, conflictsFolder, policy)
         val result = SyncResult(
             uploaded = notesResult.uploaded + todosResult.uploaded,
             downloaded = notesResult.downloaded + todosResult.downloaded,
@@ -83,7 +85,7 @@ class FolderSyncManager(context: Context) {
         result
     }
 
-    private fun syncNotes(folder: SyncFolderHandle, conflictsFolder: SyncFolderHandle): SyncResult {
+    private fun syncNotes(folder: SyncFolderHandle, conflictsFolder: SyncFolderHandle, policy: ConflictPolicy): SyncResult {
         var uploaded = 0
         var downloaded = 0
         val remoteFiles = store.listJsonFiles(folder)
@@ -122,10 +124,10 @@ class FolderSyncManager(context: Context) {
                     // Neither markNoteSynced nor upsertRemoteNote used to run here, so the local
                     // dirty flag and lastSyncedRevision never moved -- the very next sync pass
                     // compared the exact same stuck state and logged the identical conflict
-                    // again, forever. Resolve it now (most-recently-updated copy wins) so sync
+                    // again, forever. Resolve it now per the user's chosen policy so sync
                     // converges instead of looping; the copy that loses is preserved in
                     // Conflicts/ rather than silently discarded.
-                    if (note.updatedAt >= remoteUpdatedAt) {
+                    if (localWins(policy, note.updatedAt, remoteUpdatedAt)) {
                         store.upsertJson(conflictsFolder, "note-$id-$remoteUpdatedAt.json", remote.toString())
                         store.upsertJson(folder, id + ".json", note.toJson().toString())
                         local.markNoteSynced(note.id, id + ".json", note.revision, note.updatedAt)
@@ -154,7 +156,7 @@ class FolderSyncManager(context: Context) {
         return SyncResult(uploaded, downloaded, local.conflictCount())
     }
 
-    private fun syncTodos(folder: SyncFolderHandle, conflictsFolder: SyncFolderHandle): SyncResult {
+    private fun syncTodos(folder: SyncFolderHandle, conflictsFolder: SyncFolderHandle, policy: ConflictPolicy): SyncResult {
         var uploaded = 0
         var downloaded = 0
         val remoteFiles = store.listJsonFiles(folder)
@@ -190,7 +192,7 @@ class FolderSyncManager(context: Context) {
                         "todo", todo.id.toString(), todo.revision, remoteRevision,
                         todo.updatedAt, remoteUpdatedAt
                     )
-                    if (todo.updatedAt >= remoteUpdatedAt) {
+                    if (localWins(policy, todo.updatedAt, remoteUpdatedAt)) {
                         store.upsertJson(conflictsFolder, "todo-$id-$remoteUpdatedAt.json", remote.toString())
                         store.upsertJson(folder, id.toString() + ".json", todo.toJson().toString())
                         local.markTodoSynced(todo.id, id.toString() + ".json", todo.revision, todo.updatedAt)
@@ -218,6 +220,13 @@ class FolderSyncManager(context: Context) {
         }
         return SyncResult(uploaded, downloaded, local.conflictCount())
     }
+
+    private fun localWins(policy: ConflictPolicy, localUpdatedAt: Long, remoteUpdatedAt: Long): Boolean =
+        when (policy) {
+            ConflictPolicy.Newest -> localUpdatedAt >= remoteUpdatedAt
+            ConflictPolicy.Local -> true
+            ConflictPolicy.Remote -> false
+        }
 
     private fun isPristine(note: NoteRecord) =
         note.lastSyncedRevision == 0L && note.revision == 1L &&

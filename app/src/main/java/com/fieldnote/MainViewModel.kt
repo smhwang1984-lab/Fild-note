@@ -16,10 +16,12 @@ import com.fieldnote.data.FieldNoteRepository
 import com.fieldnote.data.LocalFieldNoteRepository
 import com.fieldnote.data.LocalNoteStore
 import com.fieldnote.data.NoteRecord
+import com.fieldnote.data.sync.ConflictPolicy
 import com.fieldnote.data.sync.FolderSyncManager
 import com.fieldnote.data.sync.SafSessionStore
 import com.fieldnote.data.sync.SyncPhase
 import com.fieldnote.data.sync.SyncScheduler
+import com.fieldnote.data.sync.SyncSettingsStore
 import com.fieldnote.data.sync.SyncSnapshot
 import com.fieldnote.data.sync.SyncStatusMonitor
 import com.fieldnote.data.sync.hasPersistedSyncPermission
@@ -76,7 +78,8 @@ data class SyncUiState(
     val phase: SyncPhase = SyncPhase.Idle,
     val pendingChanges: Int = 0,
     val conflicts: Int = 0,
-    val message: String = "동기화할 폴더를 선택하세요."
+    val message: String = "동기화할 폴더를 선택하세요.",
+    val conflictPolicy: ConflictPolicy = ConflictPolicy.Newest
 )
 
 /** Whether a newer `update.apk` was found at the sync folder root. See [AppUpdateChecker]. */
@@ -90,6 +93,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: FieldNoteRepository = LocalFieldNoteRepository()
     private val localStore = LocalNoteStore.get(application)
     private val session = SafSessionStore(application)
+    private val syncSettings = SyncSettingsStore(application)
     private val syncManager = FolderSyncManager(application)
 
     val uiState = MainUiState()
@@ -435,8 +439,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastSyncedAt = session.lastSyncedAt?.let(::formatTime),
         pendingChanges = localStore.pendingCount(),
         conflicts = localStore.conflictCount(),
-        message = if (session.connected) "동기화 폴더 연결 정보를 복원했습니다." else "동기화할 폴더를 선택하세요."
+        message = if (session.connected) "동기화 폴더 연결 정보를 복원했습니다." else "동기화할 폴더를 선택하세요.",
+        conflictPolicy = syncSettings.conflictPolicy
     )
+
+    /** Sets how a future sync conflict is resolved (see [ConflictPolicy]). Persists across app
+     * restarts and across disconnecting/reconnecting a sync folder. */
+    fun setConflictPolicy(policy: ConflictPolicy) {
+        syncSettings.conflictPolicy = policy
+        syncState = syncState.copy(conflictPolicy = policy)
+    }
 
     private fun applySyncSnapshot(snapshot: SyncSnapshot) {
         syncState = syncState.copy(

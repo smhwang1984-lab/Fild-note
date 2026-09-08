@@ -59,6 +59,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -129,6 +130,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var activeTool by remember { mutableStateOf(NoteTool.Pen) }
     var selectedColor by remember { mutableStateOf(Color(0xFF171717)) }
     var strokeWidth by remember { mutableFloatStateOf(6f) }
+    var strokeStability by remember { mutableFloatStateOf(DEFAULT_STABILITY) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var penOnlyMode by remember { mutableStateOf(true) }
@@ -232,6 +234,8 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 onColorSelected = { selectedColor = it },
                 strokeWidth = strokeWidth,
                 onStrokeWidthChange = { strokeWidth = it },
+                strokeStability = strokeStability,
+                onStrokeStabilityChange = { strokeStability = it },
                 penOnlyMode = penOnlyMode,
                 onPenOnlyModeChange = { penOnlyMode = it },
                 canUndo = undoStack.isNotEmpty(),
@@ -276,6 +280,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 activeTool = activeTool,
                 selectedColor = selectedColor,
                 strokeWidth = strokeWidth,
+                strokeStability = strokeStability,
                 zoom = zoom,
                 pan = pan,
                 penOnlyMode = penOnlyMode,
@@ -376,6 +381,8 @@ private fun NoteTopBar(
     onColorSelected: (Color) -> Unit,
     strokeWidth: Float,
     onStrokeWidthChange: (Float) -> Unit,
+    strokeStability: Float,
+    onStrokeStabilityChange: (Float) -> Unit,
     penOnlyMode: Boolean,
     onPenOnlyModeChange: (Boolean) -> Unit,
     canUndo: Boolean,
@@ -410,14 +417,13 @@ private fun NoteTopBar(
                 )
             }
 
-            ToolIconButton(Icons.Filled.Edit, "펜", activeTool == NoteTool.Pen) { onToolSelected(NoteTool.Pen) }
-            ToolIconButton(Icons.AutoMirrored.Filled.Backspace, "지우개", activeTool == NoteTool.Eraser) { onToolSelected(NoteTool.Eraser) }
-            ToolIconButton(Icons.Filled.ContentCut, "자르기", activeTool == NoteTool.Cut) { onToolSelected(NoteTool.Cut) }
-            ToolIconButton(Icons.Filled.OpenWith, "이동", activeTool == NoteTool.Move) { onToolSelected(NoteTool.Move) }
-
             Box {
-                IconButton(onClick = { penMenuOpen = true }) {
-                    Icon(Icons.Filled.Palette, contentDescription = "펜 색상/굵기", tint = selectedColor)
+                // Tapping the pen icon both selects the Pen tool and reveals its settings
+                // (color/width/stability) below, so there's one obvious place to tune them
+                // instead of a separate unrelated icon.
+                ToolIconButton(Icons.Filled.Edit, "펜", activeTool == NoteTool.Pen) {
+                    onToolSelected(NoteTool.Pen)
+                    penMenuOpen = true
                 }
                 DropdownMenu(expanded = penMenuOpen, onDismissRequest = { penMenuOpen = false }) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -440,9 +446,22 @@ private fun NoteTopBar(
                             steps = 9,
                             modifier = Modifier.width(200.dp)
                         )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Filled.Palette, contentDescription = null)
+                            Text(text = "필체 안정성 ${(strokeStability * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Slider(
+                            value = strokeStability * 100f,
+                            onValueChange = { onStrokeStabilityChange((it / 100f).coerceIn(0.01f, 1f)) },
+                            valueRange = 1f..100f,
+                            modifier = Modifier.width(200.dp)
+                        )
                     }
                 }
             }
+            ToolIconButton(Icons.AutoMirrored.Filled.Backspace, "지우개", activeTool == NoteTool.Eraser) { onToolSelected(NoteTool.Eraser) }
+            ToolIconButton(Icons.Filled.ContentCut, "자르기", activeTool == NoteTool.Cut) { onToolSelected(NoteTool.Cut) }
+            ToolIconButton(Icons.Filled.OpenWith, "이동", activeTool == NoteTool.Move) { onToolSelected(NoteTool.Move) }
 
             IconButton(onClick = { onPenOnlyModeChange(!penOnlyMode) }) {
                 Icon(
@@ -580,6 +599,7 @@ private fun NoteCanvas(
     activeTool: NoteTool,
     selectedColor: Color,
     strokeWidth: Float,
+    strokeStability: Float,
     zoom: Float,
     pan: Offset,
     penOnlyMode: Boolean,
@@ -600,13 +620,23 @@ private fun NoteCanvas(
     val paperColor = Color(0xFFFFFCF6)
     val lineColor = Color(0xFFE5DDCD)
 
-    fun toNotePoint(screenPoint: Offset): Offset = (screenPoint - pan) / zoom
+    // zoom/pan change continuously *during* the very pinch/pan/move gesture that produces them
+    // (onZoomChange/onPanChange fire every frame). Using them as pointerInput keys used to
+    // restart the gesture coroutine on every one of those updates -- awaitFirstDown() in the new
+    // coroutine then just hung waiting for a fresh touch-down that never came (the fingers were
+    // already down), so pinch-zoom visibly moved once and then stopped responding. Reading them
+    // through rememberUpdatedState instead lets the same long-lived coroutine see the latest
+    // value without needing to be a key.
+    val latestZoom = rememberUpdatedState(zoom)
+    val latestPan = rememberUpdatedState(pan)
+
+    fun toNotePoint(screenPoint: Offset): Offset = (screenPoint - latestPan.value) / latestZoom.value
 
     Box(
         modifier = modifier
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
             .background(paperColor, RoundedCornerShape(8.dp))
-            .pointerInput(activeTool, selectedColor, strokeWidth, zoom, pan, penOnlyMode, strokes.size, selectedStrokes) {
+            .pointerInput(activeTool, selectedColor, strokeWidth, strokeStability, penOnlyMode, strokes.size, selectedStrokes) {
                 awaitEachGesture {
                     // requireUnconsumed defaults to true: a touch that landed on a todo card
                     // (which now consumes its own down/move events, see TodoOnNoteCard) is
@@ -615,8 +645,8 @@ private fun NoteCanvas(
                     val before = strokes.toList()
 
                     if (activeTool == NoteTool.Move) {
-                        var nextPan = pan
-                        var nextZoom = zoom
+                        var nextPan = latestPan.value
+                        var nextZoom = latestZoom.value
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
@@ -640,8 +670,8 @@ private fun NoteCanvas(
                         // A second finger pinch-zooms/pans just like every other tool -- this was
                         // previously only wired up for Pen/Eraser/Move, so zoom silently did
                         // nothing while Cut was active.
-                        var cutNextPan = pan
-                        var cutNextZoom = zoom
+                        var cutNextPan = latestPan.value
+                        var cutNextZoom = latestZoom.value
                         if (selectedStrokes.isNotEmpty()) {
                             // A selection already exists: this drag moves it instead of starting
                             // a new lasso.
@@ -709,8 +739,8 @@ private fun NoteCanvas(
                         return@awaitEachGesture
                     }
 
-                    var nextPan = pan
-                    var nextZoom = zoom
+                    var nextPan = latestPan.value
+                    var nextZoom = latestZoom.value
                     val points = mutableListOf<StrokePoint>()
                     var erased = before
                     var transformed = false
@@ -772,7 +802,7 @@ private fun NoteCanvas(
 
                         if (drawingTool == NoteTool.Pen) {
                             points.add(StrokePoint(notePoint, change.pressure.coerceIn(0f, 1f)))
-                            onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizeLive(points)))
+                            onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizeLive(points, strokeStability)))
                         } else {
                             erased = eraseNear(erased, notePoint, max(24f, strokeWidth * 2.5f) / nextZoom)
                         }
@@ -782,7 +812,7 @@ private fun NoteCanvas(
                         if (before != erased) {
                             onEraseCommitted(before, erased)
                         } else if (resolved == NoteTool.Pen && points.isNotEmpty()) {
-                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, finalizeStroke(points)))
+                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, finalizeStroke(points, strokeStability)))
                         }
                     }
                 }
@@ -945,13 +975,23 @@ private fun distance(a: Offset, b: Offset): Double {
     return sqrt(dx * dx + dy * dy)
 }
 
+/** Default handwriting stability: 70%, adjustable 1%-100% from the pen settings panel. */
+private const val DEFAULT_STABILITY = 0.7f
+
 /** Cheap per-frame filtering for the live preview while the pen is still moving: dedupe
  * near-duplicate points and drop a tail that whips back sharply (the "hook" flick that shows up
- * right as a fast stroke starts to lift). Kept light so it can run on every touch-move event. */
-private fun stabilizeLive(raw: List<StrokePoint>): List<StrokePoint> {
+ * right as a fast stroke starts to lift). Kept light so it can run on every touch-move event.
+ * [stability] (0f..1f, from the settings slider) scales how aggressively points get merged and
+ * how big a "hook" has to be before it's trimmed -- higher stability = steadier line, lower =
+ * closer to the raw input. */
+private fun stabilizeLive(raw: List<StrokePoint>, stability: Float): List<StrokePoint> {
     if (raw.size <= 2) return raw
+    val s = stability.coerceIn(0f, 1f)
+    val minDistance = 0.4 + s * 2.0
+    val hookShortLength = 3.0 + s * 10.0
+    val hookReversalLength = 8.0 + s * 20.0
     val filtered = raw.fold(mutableListOf<StrokePoint>()) { acc, point ->
-        if (acc.isEmpty() || distance(acc.last().position, point.position) >= 1.4) acc.add(point)
+        if (acc.isEmpty() || distance(acc.last().position, point.position) >= minDistance) acc.add(point)
         acc
     }
     if (filtered.size <= 3) return filtered
@@ -964,7 +1004,7 @@ private fun stabilizeLive(raw: List<StrokePoint>): List<StrokePoint> {
     val v2 = last - prev
     val lastLength = distance(prev, last)
     val dot = v1.x * v2.x + v1.y * v2.y
-    if (lastLength < 8.0 || (dot < 0f && lastLength < 18.0)) {
+    if (lastLength < hookShortLength || (dot < 0f && lastLength < hookReversalLength)) {
         stable.removeAt(stable.lastIndex)
     }
     return stable
@@ -975,12 +1015,14 @@ private fun stabilizeLive(raw: List<StrokePoint>): List<StrokePoint> {
  * - Runs [stabilizeLive] first (dedupe + tail-hook trim).
  * - Trims a short hook at the START too -- the live filter only ever sees the tail, since the
  *   start point is fixed the moment the pen touches down.
- * - A light 3-point weighted moving average rounds out sharp corners and smooths the zigzag that
- *   fast handwriting produces, without moving the fixed first/last point (keeps the stroke
- *   anchored exactly where the pen touched down and lifted).
+ * - A 3-point weighted moving average rounds out sharp corners and smooths the zigzag that fast
+ *   handwriting produces, without moving the fixed first/last point (keeps the stroke anchored
+ *   exactly where the pen touched down and lifted). [stability] scales how strong that averaging
+ *   is: 0% leaves points untouched, 100% is the strongest smoothing offered.
  */
-private fun finalizeStroke(raw: List<StrokePoint>): List<StrokePoint> {
-    var points = stabilizeLive(raw)
+private fun finalizeStroke(raw: List<StrokePoint>, stability: Float): List<StrokePoint> {
+    val s = stability.coerceIn(0f, 1f)
+    var points = stabilizeLive(raw, s)
     if (points.size < 5) return points
 
     val first = points[0].position
@@ -990,19 +1032,22 @@ private fun finalizeStroke(raw: List<StrokePoint>): List<StrokePoint> {
     val v2 = third - second
     val firstLength = distance(first, second)
     val dot = v1.x * v2.x + v1.y * v2.y
-    if (firstLength < 8.0 || (dot < 0f && firstLength < 18.0)) {
+    val hookShortLength = 3.0 + s * 10.0
+    val hookReversalLength = 8.0 + s * 20.0
+    if (firstLength < hookShortLength || (dot < 0f && firstLength < hookReversalLength)) {
         points = points.drop(1)
     }
     if (points.size < 5) return points
 
+    val smoothing = s * 0.25f
     val smoothed = points.toMutableList()
     for (i in 1 until points.lastIndex) {
         val prev = points[i - 1].position
         val current = points[i]
         val next = points[i + 1].position
         val position = Offset(
-            prev.x * 0.25f + current.position.x * 0.5f + next.x * 0.25f,
-            prev.y * 0.25f + current.position.y * 0.5f + next.y * 0.25f
+            prev.x * smoothing + current.position.x * (1f - 2f * smoothing) + next.x * smoothing,
+            prev.y * smoothing + current.position.y * (1f - 2f * smoothing) + next.y * smoothing
         )
         smoothed[i] = current.copy(position = position)
     }

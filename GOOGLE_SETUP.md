@@ -129,7 +129,8 @@ Google 계정을 승인하면 양쪽이 동일한 파일을 기준으로 동기�
 
 | 상황 | 원인 | 대처 |
 |---|---|---|
-| OAuth 오류 10 (`DEVELOPER_ERROR`) | 설치된 APK의 패키지명·SHA-1이 Google Cloud의 Android OAuth 클라이언트와 다름 | 설정 화면의 진단 정보와 2절의 값을 대조. 새 클라이언트를 등록했다면 몇 분 정도 전파를 기다린다 |
+| OAuth 오류 10 (`DEVELOPER_ERROR`) | 설치된 APK의 패키지명·SHA-1이 Google Cloud의 Android OAuth 클라이언트와 **다름**(클라이언트는 존재) | 설정 화면의 진단 정보와 2절의 값을 대조. 새 클라이언트를 등록했다면 몇 분 정도 전파를 기다린다 |
+| `[8] Unknown error [status=UNREGISTERED_ON_API_CONSOLE]` | 이 패키지명·SHA-1에 해당하는 Android OAuth 클라이언트가 Google Cloud Console에 **아예 없음** | 설정 화면 진단 정보의 패키지명·SHA-1로 APIs & Services > Credentials에서 "OAuth 클라이언트 ID 만들기 > Android"를 새로 등록. 등록했는데도 나면 Google Auth Platform > Audience의 게시 상태(테스트/프로덕션)와 테스트 사용자 등록 여부 확인 |
 | 로그인 취소 / `CANCELED` | 사용자가 동의 화면을 닫음 | 다시 "계정 연결"을 누른다 |
 | `SIGN_IN_REQUIRED` | 기기의 Google 계정 세션이 만료됨 | 기기 설정에서 Google 계정 로그인 상태 확인 |
 | `NETWORK_ERROR` / 30초 타임아웃 | 네트워크 또는 Google Play 서비스 문제 | 연결 상태 확인 후 재시도 |

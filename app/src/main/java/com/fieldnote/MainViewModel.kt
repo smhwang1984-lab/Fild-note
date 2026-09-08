@@ -352,6 +352,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             error is ApiException && error.statusCode == CommonStatusCodes.DEVELOPER_ERROR ->
                 "Google OAuth 오류 10: 설정 화면의 진단 정보에 표시되는 패키지명·SHA-1이 " +
                     "Google Cloud의 Android OAuth 클라이언트 등록값과 일치하는지 확인하세요."
+            error is ApiException && error.message?.contains("UNREGISTERED_ON_API_CONSOLE") == true ->
+                "Google 인증 오류: 이 앱(패키지명·서명 SHA-1)에 해당하는 Android OAuth " +
+                    "클라이언트가 Google Cloud Console에 아예 등록되어 있지 않습니다. " +
+                    "설정 화면의 진단 정보에 표시되는 패키지명·SHA-1로 APIs & Services > " +
+                    "Credentials에서 '만들기 > OAuth 클라이언트 ID > Android' 유형을 새로 " +
+                    "등록하세요. 이미 등록했다면 Google Auth Platform의 Audience에서 " +
+                    "게시 상태(테스트/프로덕션)와 테스트 사용자 등록 여부도 확인하세요."
             error is ApiException && error.statusCode == CommonStatusCodes.CANCELED ->
                 "Google 로그인이 취소됐습니다. 다시 시도해 주세요."
             error is ApiException && error.statusCode == CommonStatusCodes.SIGN_IN_REQUIRED ->

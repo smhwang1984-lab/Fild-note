@@ -1,25 +1,43 @@
-﻿package com.fieldnote
+package com.fieldnote
 
+import android.app.Activity
 import android.app.Application
-import android.content.Context
+import android.content.Intent
+import androidx.activity.result.IntentSenderRequest
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.fieldnote.core.BuildProfile
 import com.fieldnote.data.FeatureStatus
 import com.fieldnote.data.FieldNoteRepository
 import com.fieldnote.data.LocalFieldNoteRepository
-import kotlinx.coroutines.flow.Flow
-import java.io.File
-import java.time.LocalDateTime
+import com.fieldnote.data.LocalNoteStore
+import com.fieldnote.data.NoteRecord
+import com.fieldnote.data.sync.DriveFolderRegistry
+import com.fieldnote.data.sync.DriveSessionStore
+import com.fieldnote.data.sync.DriveSyncManager
+import com.fieldnote.data.sync.GoogleDriveAuthorization
+import com.fieldnote.data.sync.SyncPhase
+import com.fieldnote.data.sync.SyncScheduler
+import com.fieldnote.data.sync.SyncSnapshot
+import com.fieldnote.data.sync.SyncStatusMonitor
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.CommonStatusCodes
+import java.time.Instant
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val DEFAULT_DUE_DAY = 2
-private const val SYNC_PREFS = "field_note_google_sync"
-private const val PREF_GOOGLE_ACCOUNT = "google_account_name"
-private const val PREF_SYNC_FOLDER = "sync_folder_path"
 
 data class TodoItem(
     val id: Long,
@@ -37,22 +55,37 @@ data class NoteTodoPlacement(
     val fixed: Boolean = false
 )
 
+data class NoteDocument(
+    val id: String,
+    val title: String,
+    val content: String,
+    val revision: Long,
+    val updatedAt: Long
+)
+
 data class MainUiState(
     val versionName: String = BuildProfile.appVersion,
     val targetDevices: List<String> = BuildProfile.targetDevices
 )
 
 data class GoogleSyncState(
+    val authorizing: Boolean = false,
     val accountName: String? = null,
     val syncEnabled: Boolean = false,
-    val syncFolderPath: String? = null,
+    val rootFolderName: String = DriveFolderRegistry.ROOT_NAME,
     val lastSyncedAt: String? = null,
-    val message: String = "Google 계정을 연결해 주세요."
+    val phase: SyncPhase = SyncPhase.Idle,
+    val pendingChanges: Int = 0,
+    val conflicts: Int = 0,
+    val message: String = "Connect a Google account."
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: FieldNoteRepository = LocalFieldNoteRepository()
-    private val prefs = application.getSharedPreferences(SYNC_PREFS, Context.MODE_PRIVATE)
+    private val localStore = LocalNoteStore.get(application)
+    private val session = DriveSessionStore(application)
+    private val authorization = GoogleDriveAuthorization(application)
+    private val syncManager = DriveSyncManager(application)
 
     val uiState = MainUiState()
     val featureStatuses: Flow<List<FeatureStatus>> = repository.featureStatuses
@@ -60,82 +93,171 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var googleSyncState by mutableStateOf(loadGoogleSyncState())
         private set
 
-    val todos = mutableStateListOf(
-        TodoItem(1L, "노트 객체 모델 준비", null, false),
-        TodoItem(2L, "달력 연결 할 일 항목 정의", DEFAULT_DUE_DAY, false),
-        TodoItem(3L, "할 일 데이터와 노트 위치 분리", null, true)
-    )
+    var currentNote by mutableStateOf(localStore.ensureSeedData().toDocument())
+        private set
 
-    val noteTodoPlacements = mutableStateListOf(
-        NoteTodoPlacement(todoId = 1L, x = 80f, y = 84f),
-        NoteTodoPlacement(todoId = 2L, x = 360f, y = 156f, fixed = true)
-    )
+    val todos = mutableStateListOf<TodoItem>()
+    val noteTodoPlacements = mutableStateListOf<NoteTodoPlacement>()
 
-    private var nextTodoId = 4L
+    init {
+        reloadFromDatabase()
+        viewModelScope.launch {
+            SyncStatusMonitor.status.collect { snapshot ->
+                applySyncSnapshot(snapshot)
+                if (snapshot.phase == SyncPhase.Synced || snapshot.phase == SyncPhase.Conflict) {
+                    reloadFromDatabase()
+                }
+            }
+        }
+        if (session.connected) {
+            SyncScheduler.ensurePeriodic(application)
+            SyncScheduler.enqueue(application)
+        }
+    }
 
-    fun connectGoogleAccount(accountName: String) {
-        val folder = configureSyncFolder(accountName)
-        prefs.edit()
-            .putString(PREF_GOOGLE_ACCOUNT, accountName)
-            .putString(PREF_SYNC_FOLDER, folder.absolutePath)
-            .apply()
-        googleSyncState = GoogleSyncState(
-            accountName = accountName,
-            syncEnabled = true,
-            syncFolderPath = folder.absolutePath,
-            message = "Google 계정과 저장 폴더가 자동 설정되었습니다."
+    fun beginGoogleAuthorization(
+        activity: Activity,
+        launchResolution: (IntentSenderRequest) -> Unit
+    ) {
+        if (googleSyncState.authorizing) return
+        googleSyncState = googleSyncState.copy(
+            authorizing = true,
+            phase = SyncPhase.Syncing,
+            message = "Requesting Google Drive access..."
         )
+        viewModelScope.launch {
+            try {
+                val existingEmail = session.accountEmail
+                if (existingEmail != null) {
+                    authorization.revoke(activity, existingEmail)
+                    clearDriveConnection()
+                    googleSyncState = googleSyncState.copy(
+                        authorizing = true,
+                        phase = SyncPhase.Syncing,
+                        message = "Requesting Google Drive access..."
+                    )
+                }
+                requestAuthorization(activity, launchResolution)
+            } catch (error: TimeoutCancellationException) {
+                authorizationFailed(error)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                authorizationFailed(error)
+            }
+        }
     }
 
-    fun disconnectGoogleAccount() {
-        prefs.edit().remove(PREF_GOOGLE_ACCOUNT).remove(PREF_SYNC_FOLDER).apply()
-        googleSyncState = GoogleSyncState(message = "Google 계정 연결이 해제되었습니다.")
+    fun completeGoogleAuthorization(intent: Intent?) {
+        try {
+            finishAuthorization(authorization.tokenFromResult(intent))
+        } catch (error: Exception) {
+            authorizationFailed(error)
+        }
     }
 
-    fun autoConfigureSyncFolder() {
-        val accountName = googleSyncState.accountName
-        if (accountName == null) {
-            googleSyncState = googleSyncState.copy(message = "먼저 Google 계정을 연결해 주세요.")
+    fun disconnectGoogleAccount(activity: Activity) {
+        if (googleSyncState.authorizing) return
+        val email = session.accountEmail
+        if (email == null) {
+            clearDriveConnection()
             return
         }
+        googleSyncState = googleSyncState.copy(authorizing = true)
+        viewModelScope.launch {
+            try {
+                authorization.revoke(activity, email)
+                clearDriveConnection()
+            } catch (error: Exception) {
+                if (error is CancellationException && error !is TimeoutCancellationException) throw error
+                clearDriveConnection()
+                googleSyncState = googleSyncState.copy(
+                    phase = SyncPhase.Error,
+                    message = "Local connection cleared, but Google access could not be revoked."
+                )
+            }
+        }
+    }
 
-        val folder = configureSyncFolder(accountName)
-        prefs.edit().putString(PREF_SYNC_FOLDER, folder.absolutePath).apply()
-        googleSyncState = googleSyncState.copy(
-            syncFolderPath = folder.absolutePath,
-            message = "저장 폴더를 자동 설정했습니다."
+    private fun clearDriveConnection() {
+        session.clear()
+        DriveFolderRegistry(getApplication()).clear()
+        SyncScheduler.cancel(getApplication())
+        googleSyncState = GoogleSyncState(message = "Google Drive disconnected. Local data is unchanged.")
+        SyncStatusMonitor.update(
+            SyncSnapshot(
+                phase = SyncPhase.AuthenticationRequired,
+                message = "Google Drive disconnected. Local data is unchanged.",
+                pendingChanges = localStore.pendingCount(),
+                conflicts = localStore.conflictCount()
+            )
         )
+    }
+
+    private suspend fun requestAuthorization(
+        activity: Activity,
+        launchResolution: (IntentSenderRequest) -> Unit
+    ) {
+        val result = authorization.authorize(activity)
+        if (result.hasResolution()) {
+            val pendingIntent = checkNotNull(result.pendingIntent) { "Missing OAuth resolution." }
+            googleSyncState = googleSyncState.copy(message = "Waiting for Google account permission...")
+            launchResolution(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+        } else {
+            finishAuthorization(checkNotNull(result.accessToken) { "Missing OAuth token." })
+        }
     }
 
     fun syncNow() {
-        val accountName = googleSyncState.accountName
-        if (accountName == null) {
-            googleSyncState = googleSyncState.copy(message = "먼저 Google 계정을 연결해 주세요.")
+        if (googleSyncState.authorizing) return
+        if (!session.connected) {
+            googleSyncState = googleSyncState.copy(
+                phase = SyncPhase.AuthenticationRequired,
+                message = "Connect a Google account first."
+            )
             return
         }
+        viewModelScope.launch {
+            try {
+                val token = withContext(Dispatchers.IO) { authorization.silentToken() }
+                if (token == null) {
+                    googleSyncState = googleSyncState.copy(
+                        phase = SyncPhase.AuthenticationRequired,
+                        message = "Google permission is required again."
+                    )
+                    return@launch
+                }
+                syncManager.sync(token, session.accountEmail)
+                reloadFromDatabase()
+            } catch (error: Exception) {
+                syncFailed(error)
+            }
+        }
+    }
 
-        val folder = googleSyncState.syncFolderPath ?: configureSyncFolder(accountName).absolutePath
-        prefs.edit().putString(PREF_SYNC_FOLDER, folder).apply()
-        googleSyncState = googleSyncState.copy(
-            syncEnabled = true,
-            syncFolderPath = folder,
-            lastSyncedAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")),
-            message = "${accountName} 기준 동기화 준비 데이터를 저장했습니다."
-        )
+    fun saveNoteContent(content: String) {
+        currentNote = localStore.saveNote(currentNote.id, currentNote.title, content).toDocument()
+        localChanged()
     }
 
     fun addTodo(title: String, dueDay: Int? = null) {
         val trimmedTitle = title.trim()
         if (trimmedTitle.isEmpty()) return
-
-        val id = nextTodoId++
-        todos.add(TodoItem(id = id, title = trimmedTitle, dueDay = dueDay))
-        addTodoToNote(id)
+        val item = localStore.saveTodo(newTodoId(), trimmedTitle, dueDay, false)
+        reloadTodos()
+        addTodoToNote(item.id)
+        localChanged()
     }
 
     fun addTodoToNote(todoId: Long) {
         if (noteTodoPlacements.any { it.todoId == todoId }) return
-        noteTodoPlacements.add(NoteTodoPlacement(todoId = todoId, x = 120f, y = 220f + (noteTodoPlacements.size * 36f)))
+        noteTodoPlacements.add(
+            NoteTodoPlacement(
+                todoId = todoId,
+                x = 120f,
+                y = 220f + (noteTodoPlacements.size * 36f)
+            )
+        )
     }
 
     fun removeNoteTodo(todoId: Long) {
@@ -149,14 +271,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateTodoDueDay(todoId: Long, dueDay: Int?) {
-        val normalizedDay = dueDay?.coerceIn(1, 30)
-        updateTodo(todoId) { it.copy(dueDay = normalizedDay) }
+        updateTodo(todoId) { it.copy(dueDay = dueDay?.coerceIn(1, 30)) }
     }
 
     fun moveNoteTodo(todoId: Long, dx: Float, dy: Float) {
         val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId }
         if (index < 0 || noteTodoPlacements[index].fixed) return
-
         val current = noteTodoPlacements[index]
         noteTodoPlacements[index] = current.copy(
             x = (current.x + dx).coerceAtLeast(0f),
@@ -167,7 +287,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resizeNoteTodo(todoId: Long, widthDeltaDp: Float, heightDeltaDp: Float) {
         val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId }
         if (index < 0 || noteTodoPlacements[index].fixed) return
-
         val current = noteTodoPlacements[index]
         noteTodoPlacements[index] = current.copy(
             widthDp = (current.widthDp + widthDeltaDp).coerceIn(160f, 420f),
@@ -177,39 +296,153 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleNoteTodoFixed(todoId: Long) {
         val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId }
-        if (index < 0) return
-
-        val current = noteTodoPlacements[index]
-        noteTodoPlacements[index] = current.copy(fixed = !current.fixed)
-    }
-
-    private fun loadGoogleSyncState(): GoogleSyncState {
-        val accountName = prefs.getString(PREF_GOOGLE_ACCOUNT, null)
-        val folder = prefs.getString(PREF_SYNC_FOLDER, null)
-        return if (accountName == null) {
-            GoogleSyncState()
-        } else {
-            GoogleSyncState(
-                accountName = accountName,
-                syncEnabled = true,
-                syncFolderPath = folder,
-                message = "저장된 Google 계정을 불러왔습니다."
+        if (index >= 0) {
+            noteTodoPlacements[index] = noteTodoPlacements[index].copy(
+                fixed = !noteTodoPlacements[index].fixed
             )
         }
     }
 
-    private fun configureSyncFolder(accountName: String): File {
-        val safeAccount = accountName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val baseDir = getApplication<Application>().getExternalFilesDir("sync") ?: getApplication<Application>().filesDir
-        val folder = File(baseDir, safeAccount)
-        folder.mkdirs()
-        return folder
+    private fun finishAuthorization(accessToken: String) {
+        googleSyncState = googleSyncState.copy(
+            authorizing = true,
+            message = "Google access granted. Connecting Drive..."
+        )
+        viewModelScope.launch {
+            try {
+                syncManager.sync(accessToken)
+                val email = requireNotNull(session.accountEmail)
+                session.connect(email)
+                SyncScheduler.ensurePeriodic(getApplication())
+                reloadFromDatabase()
+                googleSyncState = googleSyncState.copy(
+                    accountName = email,
+                    syncEnabled = true,
+                    message = "Google Drive connected."
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                syncFailed(error)
+            } finally {
+                googleSyncState = googleSyncState.copy(authorizing = false)
+            }
+        }
+    }
+
+    private fun authorizationFailed(error: Throwable) {
+        val message = when {
+            error is TimeoutCancellationException ->
+                "Google did not respond within 30 seconds. Check your network and Google Play services, then try again."
+            error is ApiException && error.statusCode == CommonStatusCodes.DEVELOPER_ERROR ->
+                "Google OAuth error 10: check the Android OAuth package name and signing SHA-1 in Google Cloud."
+            error is ApiException && error.statusCode == CommonStatusCodes.CANCELED ->
+                "Google sign-in was canceled. Please try again."
+            error is ApiException ->
+                "Google authorization error ${error.statusCode}: ${error.message ?: CommonStatusCodes.getStatusCodeString(error.statusCode)}"
+            else -> error.message ?: "Google authorization failed."
+        }
+        googleSyncState = googleSyncState.copy(
+            authorizing = false,
+            phase = SyncPhase.AuthenticationRequired,
+            message = message
+        )
+    }
+
+    private fun syncFailed(error: Throwable) {
+        val snapshot = SyncSnapshot(
+            phase = SyncPhase.Error,
+            message = error.message ?: "Drive sync failed.",
+            lastSyncedAt = session.lastSyncedAt,
+            pendingChanges = localStore.pendingCount(),
+            conflicts = localStore.conflictCount()
+        )
+        SyncStatusMonitor.update(snapshot)
+        applySyncSnapshot(snapshot)
     }
 
     private fun updateTodo(todoId: Long, transform: (TodoItem) -> TodoItem) {
-        val index = todos.indexOfFirst { it.id == todoId }
-        if (index >= 0) {
-            todos[index] = transform(todos[index])
+        val current = todos.firstOrNull { it.id == todoId } ?: return
+        val updated = transform(current)
+        localStore.saveTodo(updated.id, updated.title, updated.dueDay, updated.completed)
+        reloadTodos()
+        localChanged()
+    }
+
+    private fun localChanged() {
+        val pending = localStore.pendingCount()
+        googleSyncState = googleSyncState.copy(
+            pendingChanges = pending,
+            message = if (session.connected) "Local changes queued for Drive." else "Saved offline on this device."
+        )
+        SyncStatusMonitor.update(
+            SyncSnapshot(
+                phase = if (session.connected) SyncPhase.Idle else SyncPhase.Offline,
+                message = googleSyncState.message,
+                lastSyncedAt = session.lastSyncedAt,
+                pendingChanges = pending,
+                conflicts = localStore.conflictCount()
+            )
+        )
+        if (session.connected) SyncScheduler.enqueue(getApplication())
+    }
+
+    private fun reloadFromDatabase() {
+        currentNote = localStore.listNotes().firstOrNull()?.toDocument() ?: localStore.ensureSeedData().toDocument()
+        reloadTodos()
+    }
+
+    private fun reloadTodos() {
+        val records = localStore.listTodos()
+        todos.clear()
+        todos.addAll(records.map { TodoItem(it.id, it.title, it.dueDay, it.completed) })
+        if (noteTodoPlacements.isEmpty()) {
+            records.take(2).forEachIndexed { index, item ->
+                noteTodoPlacements += NoteTodoPlacement(
+                    todoId = item.id,
+                    x = if (index == 0) 80f else 360f,
+                    y = if (index == 0) 84f else 156f,
+                    fixed = index == 1
+                )
+            }
         }
+    }
+
+    private fun newTodoId(): Long {
+        var candidate: Long
+        do {
+            candidate = UUID.randomUUID().mostSignificantBits and Long.MAX_VALUE
+        } while (candidate == 0L || localStore.findTodo(candidate) != null)
+        return candidate
+    }
+
+    private fun loadGoogleSyncState(): GoogleSyncState = GoogleSyncState(
+        accountName = session.accountEmail,
+        syncEnabled = session.connected,
+        lastSyncedAt = session.lastSyncedAt?.let(::formatTime),
+        pendingChanges = localStore.pendingCount(),
+        conflicts = localStore.conflictCount(),
+        message = if (session.connected) "Restored Google Drive connection." else "Connect a Google account."
+    )
+
+    private fun applySyncSnapshot(snapshot: SyncSnapshot) {
+        googleSyncState = googleSyncState.copy(
+            accountName = session.accountEmail,
+            syncEnabled = session.connected,
+            lastSyncedAt = snapshot.lastSyncedAt?.let(::formatTime),
+            phase = snapshot.phase,
+            pendingChanges = snapshot.pendingChanges,
+            conflicts = snapshot.conflicts,
+            message = snapshot.message
+        )
+    }
+
+    private fun NoteRecord.toDocument() = NoteDocument(id, title, content, revision, updatedAt)
+
+    private fun formatTime(epochMillis: Long): String = FORMATTER.format(
+        Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault())
+    )
+
+    companion object {
+        private val FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     }
 }

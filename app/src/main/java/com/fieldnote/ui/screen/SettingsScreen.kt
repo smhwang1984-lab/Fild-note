@@ -1,8 +1,9 @@
 ﻿package com.fieldnote.ui.screen
 
-import android.accounts.Account
-import android.accounts.AccountManager
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.fieldnote.GoogleSyncState
@@ -33,30 +35,26 @@ fun SettingsScreen(
     uiState: MainUiState,
     featureStatuses: List<FeatureStatus>,
     googleSyncState: GoogleSyncState,
-    onGoogleAccountSelected: (String) -> Unit,
-    onGoogleAccountDisconnected: () -> Unit,
+    onGoogleAuthorizationRequested: (Activity, (IntentSenderRequest) -> Unit) -> Unit,
+    onGoogleAuthorizationCompleted: (android.content.Intent?) -> Unit,
+    onGoogleAccountDisconnected: (Activity) -> Unit,
     onSyncNow: () -> Unit,
-    onAutoConfigureSyncFolder: () -> Unit,
     tabletMode: Boolean
 ) {
-    val accountPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val accountName = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
-            if (!accountName.isNullOrBlank()) onGoogleAccountSelected(accountName)
-        }
+    val context = LocalContext.current
+    val authorizationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        onGoogleAuthorizationCompleted(result.data)
     }
 
-    fun launchGoogleAccountPicker() {
-        val intent = AccountManager.newChooseAccountIntent(
-            null as Account?,
-            null as List<Account>?,
-            arrayOf("com.google"),
-            "필드 노트 동기화에 사용할 Google 계정을 선택하세요.",
-            null,
-            null,
-            null
-        )
-        accountPicker.launch(intent)
+    fun launchGoogleAuthorization() {
+        val activity = context.findActivity() ?: return
+        onGoogleAuthorizationRequested(activity, authorizationLauncher::launch)
+    }
+
+    fun disconnectGoogleAuthorization() {
+        context.findActivity()?.let(onGoogleAccountDisconnected)
     }
 
     ScreenFrame(title = "설정", subtitle = "버전 및 동기화") {
@@ -67,10 +65,9 @@ fun SettingsScreen(
                     VersionCard(uiState = uiState)
                     GoogleSyncCard(
                         state = googleSyncState,
-                        onConnect = ::launchGoogleAccountPicker,
-                        onDisconnect = onGoogleAccountDisconnected,
-                        onSyncNow = onSyncNow,
-                        onAutoConfigureSyncFolder = onAutoConfigureSyncFolder
+                        onConnect = ::launchGoogleAuthorization,
+                        onDisconnect = ::disconnectGoogleAuthorization,
+                        onSyncNow = onSyncNow
                     )
                     FeatureStatusList(featureStatuses = featureStatuses)
                 }
@@ -81,10 +78,9 @@ fun SettingsScreen(
                 VersionCard(uiState = uiState)
                 GoogleSyncCard(
                     state = googleSyncState,
-                    onConnect = ::launchGoogleAccountPicker,
-                    onDisconnect = onGoogleAccountDisconnected,
-                    onSyncNow = onSyncNow,
-                    onAutoConfigureSyncFolder = onAutoConfigureSyncFolder
+                    onConnect = ::launchGoogleAuthorization,
+                    onDisconnect = ::disconnectGoogleAuthorization,
+                    onSyncNow = onSyncNow
                 )
                 FeatureStatusList(featureStatuses = featureStatuses)
             }
@@ -132,8 +128,7 @@ private fun GoogleSyncCard(
     state: GoogleSyncState,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onSyncNow: () -> Unit,
-    onAutoConfigureSyncFolder: () -> Unit
+    onSyncNow: () -> Unit
 ) {
     Card(
         shape = RoundedCornerShape(8.dp),
@@ -143,17 +138,23 @@ private fun GoogleSyncCard(
         Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
             Text(text = "Google 계정 동기화", style = MaterialTheme.typography.titleMedium)
             Text(text = state.accountName?.let { "연결 계정: $it" } ?: "연결 계정: 없음", style = MaterialTheme.typography.bodyMedium)
-            Text(text = state.syncFolderPath?.let { "저장 폴더: $it" } ?: "저장 폴더: 자동 설정 전", style = MaterialTheme.typography.bodySmall)
+            Text(text = "Drive 루트: ${state.rootFolderName}", style = MaterialTheme.typography.bodySmall)
             Text(text = state.lastSyncedAt?.let { "마지막 동기화: $it" } ?: "마지막 동기화: 없음", style = MaterialTheme.typography.bodySmall)
+            Text(text = "대기 ${state.pendingChanges}개 · 충돌 ${state.conflicts}개", style = MaterialTheme.typography.bodySmall)
             Text(text = state.message, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onConnect) { Text(if (state.accountName == null) "계정 연결" else "계정 변경") }
-                OutlinedButton(onClick = onAutoConfigureSyncFolder, enabled = state.accountName != null) { Text("폴더 자동 설정") }
-                OutlinedButton(onClick = onSyncNow, enabled = state.accountName != null) { Text("동기화") }
-                OutlinedButton(onClick = onDisconnect, enabled = state.accountName != null) { Text("연결 해제") }
+                Button(onClick = onConnect, enabled = !state.authorizing) { Text(if (state.accountName == null) "계정 연결" else "계정 변경") }
+                OutlinedButton(onClick = onSyncNow, enabled = state.accountName != null && !state.authorizing) { Text("동기화") }
+                OutlinedButton(onClick = onDisconnect, enabled = state.accountName != null && !state.authorizing) { Text("연결 해제") }
             }
         }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 @Composable

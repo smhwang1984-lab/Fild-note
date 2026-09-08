@@ -68,6 +68,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -97,10 +99,15 @@ private enum class NoteTool {
     Move
 }
 
+/** One recorded point of a stroke. [pressure] is normalized 0f..1f -- Android maps the S Pen's
+ * up-to-4096-level hardware pressure range onto this float, we don't see the raw 4096 steps
+ * directly, only this already-scaled value. */
+private data class StrokePoint(val position: Offset, val pressure: Float = 1f)
+
 private data class InkStroke(
     val color: Color,
     val width: Float,
-    val points: List<Offset>
+    val points: List<StrokePoint>
 )
 
 @Composable
@@ -307,7 +314,12 @@ private fun encodePages(pages: Map<Int, List<InkStroke>>): String {
         strokes.forEach { stroke ->
             val points = JSONArray()
             stroke.points.forEach { point ->
-                points.put(JSONArray().put(point.x.toDouble()).put(point.y.toDouble()))
+                points.put(
+                    JSONArray()
+                        .put(point.position.x.toDouble())
+                        .put(point.position.y.toDouble())
+                        .put(point.pressure.toDouble())
+                )
             }
             strokeArray.put(
                 JSONObject()
@@ -333,7 +345,14 @@ private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatchin
                 val points = buildList {
                     for (pointIndex in 0 until pointsJson.length()) {
                         val point = pointsJson.getJSONArray(pointIndex)
-                        add(Offset(point.getDouble(0).toFloat(), point.getDouble(1).toFloat()))
+                        // optDouble(2, 1.0) keeps notes saved before pressure was recorded
+                        // loading fine, defaulting them to full width.
+                        add(
+                            StrokePoint(
+                                Offset(point.getDouble(0).toFloat(), point.getDouble(1).toFloat()),
+                                point.optDouble(2, 1.0).toFloat()
+                            )
+                        )
                     }
                 }
                 add(
@@ -631,7 +650,7 @@ private fun NoteCanvas(
                                 lastPoint = notePoint
                                 moved = moved.map { stroke ->
                                     if (stroke in selectedStrokes) {
-                                        stroke.copy(points = stroke.points.map { it + delta })
+                                        stroke.copy(points = stroke.points.map { it.copy(position = it.position + delta) })
                                     } else {
                                         stroke
                                     }
@@ -668,16 +687,37 @@ private fun NoteCanvas(
 
                     var nextPan = pan
                     var nextZoom = zoom
-                    val points = mutableListOf<Offset>()
+                    val points = mutableListOf<StrokePoint>()
                     var erased = before
                     var transformed = false
-
-                    if (!penOnlyMode || down.type.isStylusInput()) {
-                        points.add(toNotePoint(down.position))
-                    }
+                    // The actual tool for THIS gesture is resolved once, from the first real
+                    // pointer event -- not assumed up front. Previously the down position was
+                    // added straight into `points` before anything was known about the S Pen's
+                    // side button, so a button-held erase gesture still ended up committing that
+                    // one leftover point as a 1-point Pen stroke (a stray dot) instead of erasing.
+                    var resolved: NoteTool? = null
+                    var downHandled = false
 
                     while (true) {
                         val event = awaitPointerEvent()
+
+                        if (!downHandled) {
+                            downHandled = true
+                            if (!penOnlyMode || down.type.isStylusInput()) {
+                                resolved = when {
+                                    down.type == PointerType.Eraser -> NoteTool.Eraser
+                                    down.type == PointerType.Stylus && event.buttons.isPrimaryPressed -> NoteTool.Eraser
+                                    else -> activeTool
+                                }
+                                val downPoint = toNotePoint(down.position)
+                                if (resolved == NoteTool.Pen) {
+                                    points.add(StrokePoint(downPoint, down.pressure.coerceIn(0f, 1f)))
+                                } else {
+                                    erased = eraseNear(erased, downPoint, max(24f, strokeWidth * 2.5f) / nextZoom)
+                                }
+                            }
+                        }
+
                         val pressed = event.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
 
@@ -707,18 +747,18 @@ private fun NoteCanvas(
                         }
 
                         if (drawingTool == NoteTool.Pen) {
-                            points.add(notePoint)
-                            onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizePoints(points)))
+                            points.add(StrokePoint(notePoint, change.pressure.coerceIn(0f, 1f)))
+                            onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizeLive(points)))
                         } else {
                             erased = eraseNear(erased, notePoint, max(24f, strokeWidth * 2.5f) / nextZoom)
                         }
                     }
 
-                    if (!transformed && points.isNotEmpty()) {
-                        if (activeTool == NoteTool.Pen) {
-                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, stabilizePoints(points)))
-                        } else if (before != erased) {
+                    if (!transformed) {
+                        if (before != erased) {
                             onEraseCommitted(before, erased)
+                        } else if (resolved == NoteTool.Pen && points.isNotEmpty()) {
+                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, finalizeStroke(points)))
                         }
                     }
                 }
@@ -858,18 +898,21 @@ private fun distance(a: Offset, b: Offset): Double {
     return sqrt(dx * dx + dy * dy)
 }
 
-private fun stabilizePoints(raw: List<Offset>): List<Offset> {
+/** Cheap per-frame filtering for the live preview while the pen is still moving: dedupe
+ * near-duplicate points and drop a tail that whips back sharply (the "hook" flick that shows up
+ * right as a fast stroke starts to lift). Kept light so it can run on every touch-move event. */
+private fun stabilizeLive(raw: List<StrokePoint>): List<StrokePoint> {
     if (raw.size <= 2) return raw
-    val filtered = raw.fold(mutableListOf<Offset>()) { acc, point ->
-        if (acc.isEmpty() || distance(acc.last(), point) >= 1.4) acc.add(point)
+    val filtered = raw.fold(mutableListOf<StrokePoint>()) { acc, point ->
+        if (acc.isEmpty() || distance(acc.last().position, point.position) >= 1.4) acc.add(point)
         acc
     }
     if (filtered.size <= 3) return filtered
 
     val stable = filtered.toMutableList()
-    val last = stable.last()
-    val prev = stable[stable.lastIndex - 1]
-    val beforePrev = stable[stable.lastIndex - 2]
+    val last = stable.last().position
+    val prev = stable[stable.lastIndex - 1].position
+    val beforePrev = stable[stable.lastIndex - 2].position
     val v1 = prev - beforePrev
     val v2 = last - prev
     val lastLength = distance(prev, last)
@@ -880,11 +923,50 @@ private fun stabilizePoints(raw: List<Offset>): List<Offset> {
     return stable
 }
 
+/**
+ * One-time, higher-quality pass applied when a stroke is finalized (pen lift):
+ * - Runs [stabilizeLive] first (dedupe + tail-hook trim).
+ * - Trims a short hook at the START too -- the live filter only ever sees the tail, since the
+ *   start point is fixed the moment the pen touches down.
+ * - A light 3-point weighted moving average rounds out sharp corners and smooths the zigzag that
+ *   fast handwriting produces, without moving the fixed first/last point (keeps the stroke
+ *   anchored exactly where the pen touched down and lifted).
+ */
+private fun finalizeStroke(raw: List<StrokePoint>): List<StrokePoint> {
+    var points = stabilizeLive(raw)
+    if (points.size < 5) return points
+
+    val first = points[0].position
+    val second = points[1].position
+    val third = points[2].position
+    val v1 = second - first
+    val v2 = third - second
+    val firstLength = distance(first, second)
+    val dot = v1.x * v2.x + v1.y * v2.y
+    if (firstLength < 8.0 || (dot < 0f && firstLength < 18.0)) {
+        points = points.drop(1)
+    }
+    if (points.size < 5) return points
+
+    val smoothed = points.toMutableList()
+    for (i in 1 until points.lastIndex) {
+        val prev = points[i - 1].position
+        val current = points[i]
+        val next = points[i + 1].position
+        val position = Offset(
+            prev.x * 0.25f + current.position.x * 0.5f + next.x * 0.25f,
+            prev.y * 0.25f + current.position.y * 0.5f + next.y * 0.25f
+        )
+        smoothed[i] = current.copy(position = position)
+    }
+    return smoothed
+}
+
 private fun eraseNear(strokes: List<InkStroke>, point: Offset, radius: Float): List<InkStroke> {
     val radiusSquared = radius * radius
     return strokes.filterNot { stroke ->
         stroke.points.any { strokePoint ->
-            val delta = strokePoint - point
+            val delta = strokePoint.position - point
             delta.x * delta.x + delta.y * delta.y <= radiusSquared
         }
     }
@@ -894,7 +976,7 @@ private fun eraseNear(strokes: List<InkStroke>, point: Offset, radius: Float): L
  * granularity [eraseNear] already uses (whole-stroke selection, not partial clipping). */
 private fun strokesInLasso(strokes: List<InkStroke>, lasso: List<Offset>): Set<InkStroke> {
     if (lasso.size < 3) return emptySet()
-    return strokes.filterTo(mutableSetOf()) { stroke -> stroke.points.any { pointInPolygon(it, lasso) } }
+    return strokes.filterTo(mutableSetOf()) { stroke -> stroke.points.any { pointInPolygon(it.position, lasso) } }
 }
 
 private fun pointInPolygon(point: Offset, polygon: List<Offset>): Boolean {
@@ -913,34 +995,58 @@ private fun pointInPolygon(point: Offset, polygon: List<Offset>): Boolean {
     return inside
 }
 
+/** Maps a normalized 0f..1f pressure reading to a width multiplier. A floor well above zero
+ * keeps very light touches visible instead of vanishing to a hairline. */
+private fun pressureWidthFactor(pressure: Float): Float =
+    (0.35f + 0.75f * pressure.coerceIn(0f, 1f)).coerceIn(0.35f, 1.1f)
+
 private fun DrawScope.drawInkStroke(stroke: InkStroke) {
-    if (stroke.points.isEmpty()) return
-    if (stroke.points.size == 1) {
-        drawCircle(stroke.color, stroke.width / 2f, stroke.points.first())
+    val points = stroke.points
+    if (points.isEmpty()) return
+    if (points.size == 1) {
+        val point = points.first()
+        drawCircle(stroke.color, stroke.width * pressureWidthFactor(point.pressure) / 2f, point.position)
+        return
+    }
+    if (points.size == 2) {
+        val width = stroke.width * pressureWidthFactor((points[0].pressure + points[1].pressure) / 2f)
+        drawLine(stroke.color, points[0].position, points[1].position, width, cap = StrokeCap.Round)
         return
     }
 
-    val path = Path().apply {
-        moveTo(stroke.points.first().x, stroke.points.first().y)
-        for (index in 1 until stroke.points.lastIndex) {
-            val point = stroke.points[index]
-            val next = stroke.points[index + 1]
-            val mid = Offset((point.x + next.x) / 2f, (point.y + next.y) / 2f)
-            quadraticBezierTo(point.x, point.y, mid.x, mid.y)
+    // Pressure varies the line width; each mid-to-mid quadratic segment (the classic "smooth
+    // curve through points" trick) gets its own width from that segment's pressure so the taper
+    // reads naturally instead of stepping in visible chunks.
+    for (index in 0 until points.lastIndex - 1) {
+        val p0 = points[index]
+        val p1 = points[index + 1]
+        val p2 = points[index + 2]
+        val mid1 = Offset((p0.position.x + p1.position.x) / 2f, (p0.position.y + p1.position.y) / 2f)
+        val mid2 = Offset((p1.position.x + p2.position.x) / 2f, (p1.position.y + p2.position.y) / 2f)
+        val segment = Path().apply {
+            moveTo(mid1.x, mid1.y)
+            quadraticBezierTo(p1.position.x, p1.position.y, mid2.x, mid2.y)
         }
-        val last = stroke.points.last()
-        lineTo(last.x, last.y)
+        val width = stroke.width * pressureWidthFactor(p1.pressure)
+        drawPath(segment, stroke.color, style = Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round))
     }
-
-    drawPath(path = path, color = stroke.color, style = Stroke(width = stroke.width))
+    // The mid-to-mid trick leaves the very first/last half-segments undrawn; cap them off so the
+    // stroke reaches all the way to where the pen actually touched down and lifted.
+    val startMid = Offset((points[0].position.x + points[1].position.x) / 2f, (points[0].position.y + points[1].position.y) / 2f)
+    drawLine(stroke.color, points[0].position, startMid, stroke.width * pressureWidthFactor(points[0].pressure), cap = StrokeCap.Round)
+    val endMid = Offset(
+        (points[points.lastIndex - 1].position.x + points[points.lastIndex].position.x) / 2f,
+        (points[points.lastIndex - 1].position.y + points[points.lastIndex].position.y) / 2f
+    )
+    drawLine(stroke.color, endMid, points.last().position, stroke.width * pressureWidthFactor(points.last().pressure), cap = StrokeCap.Round)
 }
 
 private fun DrawScope.drawSelectionOutline(stroke: InkStroke) {
     if (stroke.points.isEmpty()) return
-    val minX = stroke.points.minOf { it.x } - 8f
-    val maxX = stroke.points.maxOf { it.x } + 8f
-    val minY = stroke.points.minOf { it.y } - 8f
-    val maxY = stroke.points.maxOf { it.y } + 8f
+    val minX = stroke.points.minOf { it.position.x } - 8f
+    val maxX = stroke.points.maxOf { it.position.x } + 8f
+    val minY = stroke.points.minOf { it.position.y } - 8f
+    val maxY = stroke.points.maxOf { it.position.y } + 8f
     drawRect(
         color = Color(0xFF1E5AA8),
         topLeft = Offset(minX, minY),

@@ -90,9 +90,12 @@ fun FieldNoteApp(viewModel: MainViewModel) {
                             uiState = viewModel.uiState,
                             featureStatuses = featureStatuses,
                             syncState = viewModel.syncState,
+                            updateState = viewModel.updateState,
                             onSyncFolderPicked = viewModel::onSyncFolderPicked,
                             onSyncFolderDisconnected = viewModel::disconnectSyncFolder,
                             onSyncNow = viewModel::syncNow,
+                            onClearConflicts = viewModel::clearConflicts,
+                            onInstallUpdate = viewModel::installUpdate,
                             tabletMode = tabletMode
                         )
                     }

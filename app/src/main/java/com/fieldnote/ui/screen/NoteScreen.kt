@@ -1,4 +1,4 @@
-﻿package com.fieldnote.ui.screen
+package com.fieldnote.ui.screen
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -7,11 +7,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,16 +20,37 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.LineWeight
+import androidx.compose.material.icons.filled.OpenWith
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,11 +67,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
@@ -69,6 +93,7 @@ import kotlin.math.sqrt
 private enum class NoteTool {
     Pen,
     Eraser,
+    Cut,
     Move
 }
 
@@ -93,12 +118,15 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var undoStack by remember { mutableStateOf(emptyList<List<InkStroke>>()) }
     var redoStack by remember { mutableStateOf(emptyList<List<InkStroke>>()) }
     var liveStroke by remember { mutableStateOf<InkStroke?>(null) }
+    var lassoPoints by remember { mutableStateOf<List<Offset>?>(null) }
+    var selectedStrokes by remember { mutableStateOf<Set<InkStroke>>(emptySet()) }
     var activeTool by remember { mutableStateOf(NoteTool.Pen) }
     var selectedColor by remember { mutableStateOf(Color(0xFF171717)) }
     var strokeWidth by remember { mutableFloatStateOf(6f) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var penOnlyMode by remember { mutableStateOf(true) }
+    var pagesOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(viewModel.currentNote.content) {
         if (encodePages(pageStrokes) != viewModel.currentNote.content) {
@@ -110,6 +138,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
             currentPage = remotePages.keys.minOrNull() ?: 1
             undoStack = emptyList()
             redoStack = emptyList()
+            selectedStrokes = emptySet()
         }
     }
 
@@ -133,6 +162,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
             redoStack = redoStack + listOf(strokes())
             setStrokes(undoStack.last())
             undoStack = undoStack.dropLast(1)
+            selectedStrokes = emptySet()
             persistNote()
         }
     }
@@ -142,6 +172,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
             undoStack = undoStack + listOf(strokes())
             setStrokes(redoStack.last())
             redoStack = redoStack.dropLast(1)
+            selectedStrokes = emptySet()
             persistNote()
         }
     }
@@ -154,6 +185,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         undoStack = emptyList()
         redoStack = emptyList()
         liveStroke = null
+        selectedStrokes = emptySet()
         pan = Offset.Zero
         zoom = 1f
         persistNote()
@@ -164,126 +196,106 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         undoStack = emptyList()
         redoStack = emptyList()
         liveStroke = null
+        selectedStrokes = emptySet()
+        pagesOpen = false
+    }
+
+    fun selectTool(tool: NoteTool) {
+        activeTool = tool
+        selectedStrokes = emptySet()
+    }
+
+    fun deleteSelection() {
+        if (selectedStrokes.isEmpty()) return
+        val before = strokes()
+        commitSnapshot(before)
+        setStrokes(before.filterNot { it in selectedStrokes })
+        selectedStrokes = emptySet()
+        persistNote()
     }
 
     ScreenFrame(
         title = "필드 노트",
         subtitle = "S펜 중심 필기 작업 공간"
     ) {
-        if (tabletMode) {
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
-                NoteToolPanel(
-                    activeTool = activeTool,
-                    onToolSelected = { activeTool = it },
-                    selectedColor = selectedColor,
-                    onColorSelected = { selectedColor = it },
-                    strokeWidth = strokeWidth,
-                    onStrokeWidthChange = { strokeWidth = it },
-                    zoom = zoom,
-                    penOnlyMode = penOnlyMode,
-                    onPenOnlyModeChange = { penOnlyMode = it },
+        Column(modifier = Modifier.fillMaxSize()) {
+            NoteTopBar(
+                activeTool = activeTool,
+                onToolSelected = ::selectTool,
+                selectedColor = selectedColor,
+                onColorSelected = { selectedColor = it },
+                strokeWidth = strokeWidth,
+                onStrokeWidthChange = { strokeWidth = it },
+                penOnlyMode = penOnlyMode,
+                onPenOnlyModeChange = { penOnlyMode = it },
+                canUndo = undoStack.isNotEmpty(),
+                canRedo = redoStack.isNotEmpty(),
+                onUndo = ::undo,
+                onRedo = ::redo,
+                zoom = zoom,
+                onZoomIn = { zoom = (zoom + 0.25f).coerceAtMost(4f) },
+                onZoomOut = { zoom = (zoom - 0.25f).coerceAtMost(4f).coerceAtLeast(0.5f) },
+                pagesOpen = pagesOpen,
+                onTogglePages = { pagesOpen = !pagesOpen }
+            )
+
+            PagesHandle(
+                pagesOpen = pagesOpen,
+                currentPage = currentPage,
+                pageCount = pageNumbers.size,
+                onToggle = { pagesOpen = !pagesOpen },
+                onOpen = { pagesOpen = true },
+                onClose = { pagesOpen = false }
+            )
+            AnimatedVisibility(visible = pagesOpen, enter = expandVertically(), exit = shrinkVertically()) {
+                PagesDrawer(
                     pageNumbers = pageNumbers.keys.sorted(),
                     currentPage = currentPage,
                     onPageSelected = ::selectPage,
-                    onAddPage = ::addPage,
-                    canUndo = undoStack.isNotEmpty(),
-                    canRedo = redoStack.isNotEmpty(),
-                    onZoomIn = { zoom = (zoom + 0.25f).coerceAtMost(4f) },
-                    onZoomOut = { zoom = (zoom - 0.25f).coerceAtLeast(0.5f) },
-                    onUndo = ::undo,
-                    onRedo = ::redo,
-                    modifier = Modifier.width(260.dp).fillMaxHeight()
-                )
-                NoteCanvas(
-                    strokes = strokes(),
-                    liveStroke = liveStroke,
-                    todoItems = viewModel.todos,
-                    todoPlacements = viewModel.noteTodoPlacements,
-                    activeTool = activeTool,
-                    selectedColor = selectedColor,
-                    strokeWidth = strokeWidth,
-                    zoom = zoom,
-                    pan = pan,
-                    penOnlyMode = penOnlyMode,
-                    onZoomChange = { zoom = it },
-                    onPanChange = { pan = it },
-                    onLiveStrokeChange = { liveStroke = it },
-                    onStrokeCommitted = { before, stroke ->
-                        commitSnapshot(before)
-                        setStrokes(before + stroke)
-                        liveStroke = null
-                        persistNote()
-                    },
-                    onEraseCommitted = { before, after ->
-                        commitSnapshot(before)
-                        setStrokes(after)
-                        persistNote()
-                    },
-                    onTodoMoved = viewModel::moveNoteTodo,
-                    onTodoResized = viewModel::resizeNoteTodo,
-                    onTodoRemoved = viewModel::removeNoteTodo,
-                    onTodoFixedChanged = viewModel::toggleNoteTodoFixed,
-                    onTodoCheckedChanged = viewModel::toggleTodo,
-                    modifier = Modifier.weight(1f).fillMaxHeight()
+                    onAddPage = ::addPage
                 )
             }
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
-                NoteToolPanel(
-                    activeTool = activeTool,
-                    onToolSelected = { activeTool = it },
-                    selectedColor = selectedColor,
-                    onColorSelected = { selectedColor = it },
-                    strokeWidth = strokeWidth,
-                    onStrokeWidthChange = { strokeWidth = it },
-                    zoom = zoom,
-                    penOnlyMode = penOnlyMode,
-                    onPenOnlyModeChange = { penOnlyMode = it },
-                    pageNumbers = pageNumbers.keys.sorted(),
-                    currentPage = currentPage,
-                    onPageSelected = ::selectPage,
-                    onAddPage = ::addPage,
-                    canUndo = undoStack.isNotEmpty(),
-                    canRedo = redoStack.isNotEmpty(),
-                    onZoomIn = { zoom = (zoom + 0.25f).coerceAtMost(4f) },
-                    onZoomOut = { zoom = (zoom - 0.25f).coerceAtLeast(0.5f) },
-                    onUndo = ::undo,
-                    onRedo = ::redo,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                NoteCanvas(
-                    strokes = strokes(),
-                    liveStroke = liveStroke,
-                    todoItems = viewModel.todos,
-                    todoPlacements = viewModel.noteTodoPlacements,
-                    activeTool = activeTool,
-                    selectedColor = selectedColor,
-                    strokeWidth = strokeWidth,
-                    zoom = zoom,
-                    pan = pan,
-                    penOnlyMode = penOnlyMode,
-                    onZoomChange = { zoom = it },
-                    onPanChange = { pan = it },
-                    onLiveStrokeChange = { liveStroke = it },
-                    onStrokeCommitted = { before, stroke ->
-                        commitSnapshot(before)
-                        setStrokes(before + stroke)
-                        liveStroke = null
-                        persistNote()
-                    },
-                    onEraseCommitted = { before, after ->
-                        commitSnapshot(before)
-                        setStrokes(after)
-                        persistNote()
-                    },
-                    onTodoMoved = viewModel::moveNoteTodo,
-                    onTodoResized = viewModel::resizeNoteTodo,
-                    onTodoRemoved = viewModel::removeNoteTodo,
-                    onTodoFixedChanged = viewModel::toggleNoteTodoFixed,
-                    onTodoCheckedChanged = viewModel::toggleTodo,
-                    modifier = Modifier.fillMaxWidth().height(560.dp)
-                )
+
+            if (selectedStrokes.isNotEmpty()) {
+                SelectionActionBar(count = selectedStrokes.size, onDelete = ::deleteSelection, onClear = { selectedStrokes = emptySet() })
             }
+
+            NoteCanvas(
+                strokes = strokes(),
+                liveStroke = liveStroke,
+                lassoPoints = lassoPoints,
+                selectedStrokes = selectedStrokes,
+                todoItems = viewModel.todos,
+                todoPlacements = viewModel.noteTodoPlacements,
+                activeTool = activeTool,
+                selectedColor = selectedColor,
+                strokeWidth = strokeWidth,
+                zoom = zoom,
+                pan = pan,
+                penOnlyMode = penOnlyMode,
+                onZoomChange = { zoom = it },
+                onPanChange = { pan = it },
+                onLiveStrokeChange = { liveStroke = it },
+                onLassoChange = { lassoPoints = it },
+                onStrokeCommitted = { before, stroke ->
+                    commitSnapshot(before)
+                    setStrokes(before + stroke)
+                    liveStroke = null
+                    persistNote()
+                },
+                onEraseCommitted = { before, after ->
+                    commitSnapshot(before)
+                    setStrokes(after)
+                    persistNote()
+                },
+                onSelectionChanged = { selectedStrokes = it },
+                onTodoMoved = viewModel::moveNoteTodo,
+                onTodoResized = viewModel::resizeNoteTodo,
+                onTodoRemoved = viewModel::removeNoteTodo,
+                onTodoFixedChanged = viewModel::toggleNoteTodoFixed,
+                onTodoCheckedChanged = viewModel::toggleTodo,
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
         }
     }
 }
@@ -339,81 +351,192 @@ private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatchin
 }.getOrElse { mapOf(1 to emptyList()) }
 
 @Composable
-private fun NoteToolPanel(
+private fun NoteTopBar(
     activeTool: NoteTool,
     onToolSelected: (NoteTool) -> Unit,
     selectedColor: Color,
     onColorSelected: (Color) -> Unit,
     strokeWidth: Float,
     onStrokeWidthChange: (Float) -> Unit,
-    zoom: Float,
     penOnlyMode: Boolean,
     onPenOnlyModeChange: (Boolean) -> Unit,
-    pageNumbers: List<Int>,
-    currentPage: Int,
-    onPageSelected: (Int) -> Unit,
-    onAddPage: () -> Unit,
     canUndo: Boolean,
     canRedo: Boolean,
-    onZoomIn: () -> Unit,
-    onZoomOut: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
-    modifier: Modifier = Modifier
+    zoom: Float,
+    onZoomIn: () -> Unit,
+    onZoomOut: () -> Unit,
+    pagesOpen: Boolean,
+    onTogglePages: () -> Unit
 ) {
+    var penMenuOpen by remember { mutableStateOf(false) }
     val colors = listOf(Color(0xFF171717), Color(0xFF1E5AA8), Color(0xFFC0392B), Color(0xFF2E7D32))
 
     Card(
-        modifier = modifier,
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(12.dp)) {
-            Text(text = "페이지", style = MaterialTheme.typography.titleMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                pageNumbers.forEach { page ->
-                    AssistChip(onClick = { onPageSelected(page) }, label = { Text(if (page == currentPage) "${page}쪽*" else "${page}쪽") })
-                }
-                Button(onClick = onAddPage) { Text("추가") }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 4.dp, vertical = 4.dp)
+        ) {
+            IconButton(onClick = onTogglePages) {
+                Icon(
+                    if (pagesOpen) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = "페이지 목록"
+                )
             }
 
-            Text(text = "도구", style = MaterialTheme.typography.titleMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ToolChip("펜", activeTool == NoteTool.Pen) { onToolSelected(NoteTool.Pen) }
-                ToolChip("지우개", activeTool == NoteTool.Eraser) { onToolSelected(NoteTool.Eraser) }
-                ToolChip("이동", activeTool == NoteTool.Move) { onToolSelected(NoteTool.Move) }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Text(text = "S펜 모드", style = MaterialTheme.typography.bodyMedium)
-                Switch(checked = penOnlyMode, onCheckedChange = onPenOnlyModeChange)
-            }
-            Text(text = if (penOnlyMode) "필기/지우개는 S펜만 인식" else "손가락과 S펜 모두 인식", style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                colors.forEach { color ->
-                    ColorSwatch(color = color, selected = selectedColor == color) {
-                        onColorSelected(color)
-                        onToolSelected(NoteTool.Pen)
+            ToolIconButton(Icons.Filled.Edit, "펜", activeTool == NoteTool.Pen) { onToolSelected(NoteTool.Pen) }
+            ToolIconButton(Icons.AutoMirrored.Filled.Backspace, "지우개", activeTool == NoteTool.Eraser) { onToolSelected(NoteTool.Eraser) }
+            ToolIconButton(Icons.Filled.ContentCut, "자르기", activeTool == NoteTool.Cut) { onToolSelected(NoteTool.Cut) }
+            ToolIconButton(Icons.Filled.OpenWith, "이동", activeTool == NoteTool.Move) { onToolSelected(NoteTool.Move) }
+
+            Box {
+                IconButton(onClick = { penMenuOpen = true }) {
+                    Icon(Icons.Filled.Palette, contentDescription = "펜 색상/굵기", tint = selectedColor)
+                }
+                DropdownMenu(expanded = penMenuOpen, onDismissRequest = { penMenuOpen = false }) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            colors.forEach { color ->
+                                ColorSwatch(color = color, selected = selectedColor == color) {
+                                    onColorSelected(color)
+                                    onToolSelected(NoteTool.Pen)
+                                }
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Filled.LineWeight, contentDescription = null)
+                            Text(text = "굵기 ${strokeWidth.toInt()}", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Slider(
+                            value = strokeWidth,
+                            onValueChange = onStrokeWidthChange,
+                            valueRange = 2f..22f,
+                            steps = 9,
+                            modifier = Modifier.width(200.dp)
+                        )
                     }
                 }
             }
-            Text(text = "굵기 ${strokeWidth.toInt()}", style = MaterialTheme.typography.bodySmall)
-            Slider(value = strokeWidth, onValueChange = onStrokeWidthChange, valueRange = 2f..22f, steps = 9)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onUndo, enabled = canUndo) { Text("되돌리기") }
-                Button(onClick = onRedo, enabled = canRedo) { Text("다시") }
+
+            IconButton(onClick = { onPenOnlyModeChange(!penOnlyMode) }) {
+                Icon(
+                    Icons.Filled.TouchApp,
+                    contentDescription = "손가락 입력 허용",
+                    tint = if (penOnlyMode) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
+                )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onZoomOut) { Text("-") }
-                AssistChip(onClick = {}, label = { Text("${(zoom * 100).toInt()}%") })
-                Button(onClick = onZoomIn) { Text("+") }
-            }
+
+            IconButton(onClick = onUndo, enabled = canUndo) { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "되돌리기") }
+            IconButton(onClick = onRedo, enabled = canRedo) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "다시 실행") }
+
+            IconButton(onClick = onZoomOut) { Icon(Icons.Filled.ZoomOut, contentDescription = "축소") }
+            Text(text = "${(zoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+            IconButton(onClick = onZoomIn) { Icon(Icons.Filled.ZoomIn, contentDescription = "확대") }
         }
     }
 }
 
 @Composable
-private fun ToolChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    AssistChip(onClick = onClick, label = { Text(if (selected) "$label*" else label) })
+private fun ToolIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun PagesHandle(
+    pagesOpen: Boolean,
+    currentPage: Int,
+    pageCount: Int,
+    onToggle: () -> Unit,
+    onOpen: () -> Unit,
+    onClose: () -> Unit
+) {
+    var dragAccumulated by remember { mutableFloatStateOf(0f) }
+    Row(
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(28.dp)
+            .clickable(onClick = onToggle)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragEnd = { dragAccumulated = 0f },
+                    onDragCancel = { dragAccumulated = 0f },
+                    onVerticalDrag = { change, dragAmount ->
+                        change.consume()
+                        dragAccumulated += dragAmount
+                        if (dragAccumulated > 40f) {
+                            onOpen()
+                            dragAccumulated = 0f
+                        } else if (dragAccumulated < -40f) {
+                            onClose()
+                            dragAccumulated = 0f
+                        }
+                    }
+                )
+            }
+    ) {
+        Icon(
+            if (pagesOpen) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp)
+        )
+        Text(text = "페이지 $currentPage/$pageCount", style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun PagesDrawer(
+    pageNumbers: List<Int>,
+    currentPage: Int,
+    onPageSelected: (Int) -> Unit,
+    onAddPage: () -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(10.dp)
+        ) {
+            pageNumbers.forEach { page ->
+                AssistChip(onClick = { onPageSelected(page) }, label = { Text(if (page == currentPage) "${page}쪽*" else "${page}쪽") })
+            }
+            IconButton(onClick = onAddPage) { Icon(Icons.Filled.Add, contentDescription = "페이지 추가") }
+        }
+    }
+}
+
+@Composable
+private fun SelectionActionBar(count: Int, onDelete: () -> Unit, onClear: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        Text(text = "${count}개 선택됨 · 드래그하면 이동", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+        IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "선택 삭제") }
+        AssistChip(onClick = onClear, label = { Text("선택 해제") })
+    }
 }
 
 @Composable
@@ -432,6 +555,8 @@ private fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
 private fun NoteCanvas(
     strokes: List<InkStroke>,
     liveStroke: InkStroke?,
+    lassoPoints: List<Offset>?,
+    selectedStrokes: Set<InkStroke>,
     todoItems: List<TodoItem>,
     todoPlacements: List<NoteTodoPlacement>,
     activeTool: NoteTool,
@@ -443,8 +568,10 @@ private fun NoteCanvas(
     onZoomChange: (Float) -> Unit,
     onPanChange: (Offset) -> Unit,
     onLiveStrokeChange: (InkStroke?) -> Unit,
+    onLassoChange: (List<Offset>?) -> Unit,
     onStrokeCommitted: (before: List<InkStroke>, stroke: InkStroke) -> Unit,
     onEraseCommitted: (before: List<InkStroke>, after: List<InkStroke>) -> Unit,
+    onSelectionChanged: (Set<InkStroke>) -> Unit,
     onTodoMoved: (todoId: Long, dx: Float, dy: Float) -> Unit,
     onTodoResized: (todoId: Long, widthDeltaDp: Float, heightDeltaDp: Float) -> Unit,
     onTodoRemoved: (todoId: Long) -> Unit,
@@ -461,7 +588,7 @@ private fun NoteCanvas(
         modifier = modifier
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
             .background(paperColor, RoundedCornerShape(8.dp))
-            .pointerInput(activeTool, selectedColor, strokeWidth, zoom, pan, penOnlyMode, strokes.size) {
+            .pointerInput(activeTool, selectedColor, strokeWidth, zoom, pan, penOnlyMode, strokes.size, selectedStrokes) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val before = strokes.toList()
@@ -483,6 +610,57 @@ private fun NoteCanvas(
                                 val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
                                 nextPan += change.positionChange()
                                 onPanChange(nextPan)
+                            }
+                        }
+                        return@awaitEachGesture
+                    }
+
+                    if (activeTool == NoteTool.Cut) {
+                        if (selectedStrokes.isNotEmpty()) {
+                            // A selection already exists: this drag moves it instead of starting
+                            // a new lasso.
+                            var lastPoint = toNotePoint(down.position)
+                            var moved = before
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) break
+                                val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
+                                val notePoint = toNotePoint(change.position)
+                                val delta = notePoint - lastPoint
+                                lastPoint = notePoint
+                                moved = moved.map { stroke ->
+                                    if (stroke in selectedStrokes) {
+                                        stroke.copy(points = stroke.points.map { it + delta })
+                                    } else {
+                                        stroke
+                                    }
+                                }
+                            }
+                            if (moved != before) {
+                                onEraseCommitted(before, moved)
+                                // moved is before mapped 1:1 (same size/order), so pair them up to
+                                // find selected strokes' new (moved) instances for the next drag.
+                                val newSelection = before.indices
+                                    .filter { before[it] in selectedStrokes }
+                                    .map { moved[it] }
+                                    .toSet()
+                                onSelectionChanged(newSelection)
+                            }
+                        } else {
+                            val lasso = mutableListOf(toNotePoint(down.position))
+                            onLassoChange(lasso.toList())
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) break
+                                val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
+                                lasso.add(toNotePoint(change.position))
+                                onLassoChange(lasso.toList())
+                            }
+                            onLassoChange(null)
+                            if (lasso.size >= 3) {
+                                onSelectionChanged(strokesInLasso(before, lasso))
                             }
                         }
                         return@awaitEachGesture
@@ -518,7 +696,15 @@ private fun NoteCanvas(
                         val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
                         if (penOnlyMode && !change.type.isStylusInput()) continue
                         val notePoint = (change.position - nextPan) / nextZoom
-                        val drawingTool = if (change.type == PointerType.Eraser) NoteTool.Eraser else activeTool
+                        // The S Pen's hardware eraser tip reports PointerType.Eraser. Holding the
+                        // pen's side button while the tip touches down reports PointerType.Stylus
+                        // with the primary button flagged in the pointer event -- treat that the
+                        // same way, so either one erases without switching tools.
+                        val drawingTool = when {
+                            change.type == PointerType.Eraser -> NoteTool.Eraser
+                            change.type == PointerType.Stylus && event.buttons.isPrimaryPressed -> NoteTool.Eraser
+                            else -> activeTool
+                        }
 
                         if (drawingTool == NoteTool.Pen) {
                             points.add(notePoint)
@@ -552,8 +738,12 @@ private fun NoteCanvas(
             drawContext.canvas.save()
             drawContext.canvas.translate(pan.x, pan.y)
             drawContext.canvas.scale(zoom, zoom)
-            strokes.forEach { drawInkStroke(it) }
+            strokes.forEach { stroke ->
+                drawInkStroke(stroke)
+                if (stroke in selectedStrokes) drawSelectionOutline(stroke)
+            }
             liveStroke?.let { drawInkStroke(it) }
+            lassoPoints?.let { drawLasso(it) }
             drawContext.canvas.restore()
         }
 
@@ -700,6 +890,29 @@ private fun eraseNear(strokes: List<InkStroke>, point: Offset, radius: Float): L
     }
 }
 
+/** A stroke is "in" the lasso if any one of its points falls inside the closed loop -- the same
+ * granularity [eraseNear] already uses (whole-stroke selection, not partial clipping). */
+private fun strokesInLasso(strokes: List<InkStroke>, lasso: List<Offset>): Set<InkStroke> {
+    if (lasso.size < 3) return emptySet()
+    return strokes.filterTo(mutableSetOf()) { stroke -> stroke.points.any { pointInPolygon(it, lasso) } }
+}
+
+private fun pointInPolygon(point: Offset, polygon: List<Offset>): Boolean {
+    var inside = false
+    var j = polygon.lastIndex
+    for (i in polygon.indices) {
+        val pi = polygon[i]
+        val pj = polygon[j]
+        if ((pi.y > point.y) != (pj.y > point.y) &&
+            point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x
+        ) {
+            inside = !inside
+        }
+        j = i
+    }
+    return inside
+}
+
 private fun DrawScope.drawInkStroke(stroke: InkStroke) {
     if (stroke.points.isEmpty()) return
     if (stroke.points.size == 1) {
@@ -720,4 +933,33 @@ private fun DrawScope.drawInkStroke(stroke: InkStroke) {
     }
 
     drawPath(path = path, color = stroke.color, style = Stroke(width = stroke.width))
+}
+
+private fun DrawScope.drawSelectionOutline(stroke: InkStroke) {
+    if (stroke.points.isEmpty()) return
+    val minX = stroke.points.minOf { it.x } - 8f
+    val maxX = stroke.points.maxOf { it.x } + 8f
+    val minY = stroke.points.minOf { it.y } - 8f
+    val maxY = stroke.points.maxOf { it.y } + 8f
+    drawRect(
+        color = Color(0xFF1E5AA8),
+        topLeft = Offset(minX, minY),
+        size = androidx.compose.ui.geometry.Size(maxX - minX, maxY - minY),
+        style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f)))
+    )
+}
+
+private fun DrawScope.drawLasso(points: List<Offset>) {
+    if (points.size < 2) return
+    val path = Path().apply {
+        moveTo(points.first().x, points.first().y)
+        for (index in 1 until points.size) {
+            lineTo(points[index].x, points[index].y)
+        }
+    }
+    drawPath(
+        path = path,
+        color = Color(0xFF1E5AA8),
+        style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f)))
+    )
 }

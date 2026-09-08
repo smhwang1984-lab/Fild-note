@@ -21,8 +21,8 @@ android {
         applicationId = "com.fieldnote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.1.0"
+        versionCode = 12
+        versionName = "1.2.0"
     }
 
     signingConfigs {
@@ -72,8 +72,12 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.compose.ui:ui:1.6.8")
     implementation("androidx.compose.ui:ui-graphics:1.6.8")
+    // AnimatedVisibility/expandVertically/shrinkVertically for the pages drawer.
+    implementation("androidx.compose.animation:animation:1.6.8")
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.8")
     implementation("androidx.compose.material3:material3:1.2.1")
+    // Icon set for the note screen's top icon bar (pen/eraser/cut/move, undo/redo, zoom, ...).
+    implementation("androidx.compose.material:material-icons-extended:1.6.8")
     // Storage Access Framework: DocumentFile wraps the SAF content:// tree the user picks via
     // ActivityResultContracts.OpenDocumentTree() (e.g. a folder inside their Google Drive app).
     implementation("androidx.documentfile:documentfile:1.0.1")

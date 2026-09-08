@@ -23,15 +23,19 @@ import com.fieldnote.data.sync.SyncScheduler
 import com.fieldnote.data.sync.SyncSnapshot
 import com.fieldnote.data.sync.SyncStatusMonitor
 import com.fieldnote.data.sync.hasPersistedSyncPermission
+import com.fieldnote.update.AppUpdateChecker
+import com.fieldnote.update.UpdateInfo
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val DEFAULT_DUE_DAY = 2
 
@@ -74,6 +78,13 @@ data class SyncUiState(
     val message: String = "동기화할 폴더를 선택하세요."
 )
 
+/** Whether a newer `update.apk` was found at the sync folder root. See [AppUpdateChecker]. */
+data class UpdateUiState(
+    val checking: Boolean = false,
+    val availableVersionName: String? = null,
+    val message: String? = null
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: FieldNoteRepository = LocalFieldNoteRepository()
     private val localStore = LocalNoteStore.get(application)
@@ -85,6 +96,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     var syncState by mutableStateOf(loadSyncState())
         private set
+
+    var updateState by mutableStateOf(UpdateUiState())
+        private set
+    private var pendingUpdate: UpdateInfo? = null
 
     var currentNote by mutableStateOf(localStore.ensureSeedData().toDocument())
         private set
@@ -147,6 +162,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 session.markSynced(System.currentTimeMillis())
                 SyncScheduler.ensurePeriodic(app)
                 reloadFromDatabase()
+                checkForUpdate(uri)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 syncFailed(error)
@@ -208,12 +224,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 syncManager.sync(treeUri)
                 session.markSynced(System.currentTimeMillis())
                 reloadFromDatabase()
+                checkForUpdate(treeUri)
             } catch (error: Exception) {
                 syncFailed(error)
             } finally {
                 syncState = syncState.copy(syncing = false)
             }
         }
+    }
+
+    /**
+     * Looks for a newer `update.apk` at the sync folder root. Runs after every successful sync
+     * (manual "동기화"/"새로고침" tap, the first sync right after picking a folder, and the
+     * periodic background sync), which is what satisfies "새로고침이나 최초 접속 시" without a
+     * separate startup poll.
+     */
+    private fun checkForUpdate(treeUri: Uri) {
+        viewModelScope.launch {
+            val info = withContext(Dispatchers.IO) {
+                runCatching { AppUpdateChecker.check(getApplication(), treeUri) }.getOrNull()
+            }
+            pendingUpdate = info
+            updateState = if (info != null) {
+                UpdateUiState(
+                    availableVersionName = info.versionName,
+                    message = "새 버전 ${info.versionName}을(를) 설치할 수 있습니다."
+                )
+            } else {
+                UpdateUiState()
+            }
+        }
+    }
+
+    /** Opens the system installer for the update found by [checkForUpdate]. Android still
+     * requires the user to confirm the install themselves in that screen. */
+    fun installUpdate() {
+        val info = pendingUpdate ?: return
+        getApplication<Application>().startActivity(AppUpdateChecker.installIntent(getApplication(), info.apkFile))
     }
 
     fun saveNoteContent(content: String) {

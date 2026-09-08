@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.fieldnote.MainUiState
 import com.fieldnote.SyncUiState
+import com.fieldnote.UpdateUiState
 import com.fieldnote.data.FeatureStatus
 import com.fieldnote.ui.navigation.ScreenFrame
 
@@ -31,10 +32,12 @@ fun SettingsScreen(
     uiState: MainUiState,
     featureStatuses: List<FeatureStatus>,
     syncState: SyncUiState,
+    updateState: UpdateUiState,
     onSyncFolderPicked: (Uri) -> Unit,
     onSyncFolderDisconnected: () -> Unit,
     onSyncNow: () -> Unit,
     onClearConflicts: () -> Unit,
+    onInstallUpdate: () -> Unit,
     tabletMode: Boolean
 ) {
     val folderPickerLauncher = rememberLauncherForActivityResult(
@@ -46,7 +49,7 @@ fun SettingsScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
                 SettingsMenu(modifier = Modifier.width(220.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.weight(1f)) {
-                    VersionCard(uiState = uiState)
+                    VersionCard(uiState = uiState, updateState = updateState, onRefresh = onSyncNow, onInstallUpdate = onInstallUpdate)
                     SyncFolderCard(
                         state = syncState,
                         onPickFolder = { folderPickerLauncher.launch(null) },
@@ -60,7 +63,7 @@ fun SettingsScreen(
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SettingsMenu(modifier = Modifier.fillMaxWidth())
-                VersionCard(uiState = uiState)
+                VersionCard(uiState = uiState, updateState = updateState, onRefresh = onSyncNow, onInstallUpdate = onInstallUpdate)
                 SyncFolderCard(
                     state = syncState,
                     onPickFolder = { folderPickerLauncher.launch(null) },
@@ -91,7 +94,12 @@ private fun SettingsMenu(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun VersionCard(uiState: MainUiState) {
+private fun VersionCard(
+    uiState: MainUiState,
+    updateState: UpdateUiState,
+    onRefresh: () -> Unit,
+    onInstallUpdate: () -> Unit
+) {
     Card(
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -99,11 +107,18 @@ private fun VersionCard(uiState: MainUiState) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
             Text(text = "현재 버전: ${uiState.versionName}", style = MaterialTheme.typography.titleMedium)
-            Text(text = "최신 버전: 확인 전", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = updateState.availableVersionName?.let { "새 버전: $it" } ?: "최신 버전을 사용 중입니다",
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(text = "대상 기기: ${uiState.targetDevices.joinToString()}", style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = "동기화 폴더 루트에 update.apk 파일을 두면 동기화할 때마다 자동으로 확인합니다.",
+                style = MaterialTheme.typography.bodySmall
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {}) { Text("새로고침") }
-                Button(onClick = {}, enabled = false) { Text("업데이트") }
+                OutlinedButton(onClick = onRefresh) { Text("새로고침") }
+                Button(onClick = onInstallUpdate, enabled = updateState.availableVersionName != null) { Text("업데이트") }
             }
         }
     }

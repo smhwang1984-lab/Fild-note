@@ -3,6 +3,7 @@ package com.fieldnote.data.sync
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import java.io.File
 import java.io.IOException
 
 /**
@@ -82,5 +83,22 @@ class SafFileStore(private val context: Context) : SyncFileStore {
             ?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
             ?: throw IOException("파일에 쓸 수 없습니다: $name")
         return SafFileHandle(target)
+    }
+
+    // -- Below: not part of the SyncFileStore contract (arbitrary/binary files, not the
+    // note/todo JSON entities), used only by AppUpdateChecker.
+
+    /** Finds a file named [name] directly under [folder] (non-recursive), or null. */
+    fun findFile(folder: SyncFolderHandle, name: String): SyncFileHandle? {
+        val found = (folder as SafFolderHandle).document.findFile(name) ?: return null
+        return if (found.isFile) SafFileHandle(found) else null
+    }
+
+    /** Copies [file]'s raw bytes to a local [destination] file (overwriting it if present). */
+    fun copyToLocalFile(file: SyncFileHandle, destination: File) {
+        val uri = (file as SafFileHandle).document.uri
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            destination.outputStream().use { output -> input.copyTo(output) }
+        } ?: throw IOException("파일을 읽을 수 없습니다: ${file.name}")
     }
 }

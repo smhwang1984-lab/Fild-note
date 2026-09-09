@@ -83,17 +83,20 @@ try {
 
     $releaseDir = Join-Path $projectRoot "release\v$expectedVersionName"
     New-Item -ItemType Directory -Force $releaseDir | Out-Null
-    $releaseApk = Join-Path $releaseDir "FieldNote-v$expectedVersionName-release.apk"
+    $releaseApk = Join-Path $releaseDir "FieldNote-v$expectedVersionName.apk"
     Copy-Item -Force $apk $releaseApk
-    $updateApk = Join-Path $releaseDir "update.apk"
-    Copy-Item -Force $releaseApk $updateApk
+    # One-time bridge for devices still running 1.2.6, whose old updater only knows update.apk.
+    # From 1.2.7 onward the app discovers FieldNote-vX.Y.Z.apk/fildnote-vX.Y.Z.apk directly.
+    $legacyUpdateApk = Join-Path $releaseDir "update.apk"
+    Copy-Item -Force $releaseApk $legacyUpdateApk
 
     $hash = Get-FileHash -Algorithm SHA256 $releaseApk
-    $hashFile = Join-Path $releaseDir "FieldNote-v$expectedVersionName-release.sha256"
-    "$($hash.Hash.ToLowerInvariant())  FieldNote-v$expectedVersionName-release.apk" | Set-Content -Encoding ASCII $hashFile
+    $hashFile = Join-Path $releaseDir "FieldNote-v$expectedVersionName.apk.sha256"
+    "$($hash.Hash.ToLowerInvariant())  FieldNote-v$expectedVersionName.apk" | Set-Content -Encoding ASCII $hashFile
 
     Write-Host "Release APK: $releaseApk"
-    Write-Host "Drive update APK: $updateApk"
+    Write-Host "Legacy 1.2.6 bridge APK: $legacyUpdateApk"
+    Write-Host "Optional SHA-256 file: $hashFile"
     Write-Host "Package: $actualPackage"
     Write-Host "Version: $actualVersionName ($actualVersionCode)"
     Write-Host "Signer SHA-1: $expectedSha1"

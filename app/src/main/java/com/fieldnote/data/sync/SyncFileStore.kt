@@ -104,6 +104,12 @@ class SafFileStore(private val context: Context) : SyncFileStore {
         return match?.let { SafFileHandle(it) }
     }
 
+    /** Lists every regular file directly under [folder]. Used for version-named APK discovery. */
+    fun listFiles(folder: SyncFolderHandle): List<SyncFileHandle> =
+        (folder as SafFolderHandle).document.listFiles()
+            .filter { it.isFile }
+            .map { SafFileHandle(it) }
+
     /** Copies [file]'s raw bytes to a local [destination] file (overwriting it if present). */
     fun copyToLocalFile(file: SyncFileHandle, destination: File) {
         val uri = (file as SafFileHandle).document.uri

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- AppUpdateChecker copies update.apk from the SAF sync folder into
+    <!-- AppUpdateChecker copies a version-named APK from the SAF sync folder into
          context.cacheDir/updates/ so PackageManager can inspect it and the system installer can
          read it via a content:// Uri from this provider. -->
     <cache-path name="updates" path="updates/" />

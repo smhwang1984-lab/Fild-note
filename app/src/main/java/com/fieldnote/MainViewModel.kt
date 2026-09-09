@@ -45,6 +45,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private const val DEFAULT_DUE_DAY = 2
+private const val NOTE_SAVE_COALESCE_DELAY_MS = 50L
+private const val NOTE_PAGE_WIDTH = 210f
+private const val NOTE_PAGE_HEIGHT = 297f
 
 data class TodoItem(
     val id: Long,
@@ -58,8 +61,8 @@ data class NoteTodoPlacement(
     val pageNumber: Int = 1,
     val x: Float,
     val y: Float,
-    val widthDp: Float = 220f,
-    val heightDp: Float = 118f,
+    val widthDp: Float = 160f,
+    val heightDp: Float = 92f,
     val fixed: Boolean = false
 )
 
@@ -69,6 +72,12 @@ data class NoteDocument(
     val content: String,
     val revision: Long,
     val updatedAt: Long
+)
+
+private data class PendingNoteSave(
+    val noteId: String,
+    val title: String,
+    val content: String
 )
 
 data class MainUiState(
@@ -87,7 +96,7 @@ data class SyncUiState(
     val conflictPolicy: ConflictPolicy = ConflictPolicy.Newest
 )
 
-/** Whether a newer `update.apk` was found at the sync folder root. See [AppUpdateChecker]. */
+/** Whether a newer version-named APK was found at the sync folder root. */
 data class UpdateUiState(
     val checking: Boolean = false,
     val availableVersionName: String? = null,
@@ -123,6 +132,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // succession, so a drawing session enqueues one sync shortly after the user pauses instead
     // of one per stroke.
     private var syncDebounceJob: Job? = null
+    private var noteSaveJob: Job? = null
+    private var pendingNoteSave: PendingNoteSave? = null
 
     init {
         reloadFromDatabase()
@@ -250,7 +261,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Looks for a newer `update.apk` at the sync folder root. This is independent from note-data
+     * Looks for a newer version-named APK at the sync folder root. This is independent from note-data
      * sync so adding only an APK does not depend on a successful Notes/Todos synchronization.
      */
     fun refreshUpdate() {
@@ -272,7 +283,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun checkForUpdate(treeUri: Uri) {
         updateCheckJob?.cancel()
         pendingUpdate = null
-        updateState = UpdateUiState(checking = true, message = "update.apk를 확인하는 중...")
+        updateState = UpdateUiState(checking = true, message = "버전명이 있는 APK를 확인하는 중...")
         updateCheckJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { AppUpdateChecker.check(getApplication(), treeUri) }
             when (result) {
@@ -280,16 +291,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     pendingUpdate = result.info
                     updateState = UpdateUiState(
                         availableVersionName = result.info.versionName,
-                        message = "새 버전 ${result.info.versionName}을(를) 설치할 수 있습니다."
+                        message = "${result.info.sourceFileName}에서 새 버전 ${result.info.versionName}을 찾았습니다."
                     )
                 }
                 is UpdateCheckResult.NotFound -> {
                     pendingUpdate = null
-                    updateState = UpdateUiState(message = "동기화 폴더 루트에서 update.apk를 찾지 못했습니다.")
+                    updateState = UpdateUiState(message = "동기화 폴더 루트에서 FieldNote-vX.Y.Z.apk 형식의 파일을 찾지 못했습니다.")
                 }
                 is UpdateCheckResult.UpToDate -> {
                     pendingUpdate = null
-                    updateState = UpdateUiState(message = "최신 버전을 사용 중입니다(update.apk도 ${result.versionName}).")
+                    updateState = UpdateUiState(message = "최신 버전을 사용 중입니다(폴더의 최고 버전 ${result.versionName}).")
                 }
                 is UpdateCheckResult.Failed -> {
                     pendingUpdate = null
@@ -321,9 +332,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveNoteContent(content: String) {
-        currentNote = localStore.saveNote(currentNote.id, currentNote.title, content).toDocument()
-        localChanged()
+    fun saveNoteContent(content: String, immediate: Boolean = false) {
+        if (currentNote.content == content && pendingNoteSave == null) return
+        val request = PendingNoteSave(currentNote.id, currentNote.title, content)
+        currentNote = currentNote.copy(content = content, updatedAt = System.currentTimeMillis())
+        pendingNoteSave = request
+        noteSaveJob?.cancel()
+        noteSaveJob = viewModelScope.launch {
+            if (!immediate) delay(NOTE_SAVE_COALESCE_DELAY_MS)
+            val latestRequest = pendingNoteSave ?: return@launch
+            val result = withContext(Dispatchers.IO) {
+                val saved = localStore.saveNote(
+                    latestRequest.noteId,
+                    latestRequest.title,
+                    latestRequest.content
+                ).toDocument()
+                Triple(saved, localStore.pendingCount(), localStore.conflictCount())
+            }
+            if (pendingNoteSave == latestRequest) pendingNoteSave = null
+            if (currentNote.id == latestRequest.noteId && currentNote.content == latestRequest.content) {
+                currentNote = result.first
+            }
+            localChanged(result.second, result.third)
+        }
     }
 
     fun setActiveNotePage(pageNumber: Int) {
@@ -344,8 +375,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         noteTodoPlacements.add(NoteTodoPlacement(
             todoId = todoId,
             pageNumber = activeNotePage,
-            x = 120f,
-            y = 220f + (noteTodoPlacements.count { it.pageNumber == activeNotePage } * 36f)
+            x = 24f,
+            y = (32f + noteTodoPlacements.count { it.pageNumber == activeNotePage } * 48f).coerceAtMost(NOTE_PAGE_HEIGHT - 92f)
         ))
         saveNoteTodoPlacements()
     }
@@ -370,8 +401,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (index < 0 || noteTodoPlacements[index].fixed) return
         val current = noteTodoPlacements[index]
         noteTodoPlacements[index] = current.copy(
-            x = (current.x + dx).coerceAtLeast(0f),
-            y = (current.y + dy).coerceAtLeast(0f)
+            x = (current.x + dx).coerceIn(0f, NOTE_PAGE_WIDTH),
+            y = (current.y + dy).coerceIn(0f, NOTE_PAGE_HEIGHT)
         )
     }
 
@@ -380,8 +411,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (index < 0 || noteTodoPlacements[index].fixed) return
         val current = noteTodoPlacements[index]
         noteTodoPlacements[index] = current.copy(
-            widthDp = (current.widthDp + widthDeltaDp).coerceIn(160f, 420f),
-            heightDp = (current.heightDp + heightDeltaDp).coerceIn(92f, 260f)
+            widthDp = (current.widthDp + widthDeltaDp).coerceIn(40f, 210f),
+            heightDp = (current.heightDp + heightDeltaDp).coerceIn(36f, 180f)
         )
     }
 
@@ -435,8 +466,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         localChanged()
     }
 
-    private fun localChanged() {
-        val pending = localStore.pendingCount()
+    private fun localChanged(
+        pendingOverride: Int? = null,
+        conflictsOverride: Int? = null
+    ) {
+        val pending = pendingOverride ?: localStore.pendingCount()
         syncState = syncState.copy(
             pendingChanges = pending,
             message = if (session.connected) "변경 사항이 동기화 폴더 업로드 대기 중입니다." else "이 기기에 오프라인으로 저장됐습니다."
@@ -447,7 +481,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 message = syncState.message,
                 lastSyncedAt = session.lastSyncedAt,
                 pendingChanges = pending,
-                conflicts = localStore.conflictCount()
+                conflicts = conflictsOverride ?: localStore.conflictCount()
             )
         )
         if (session.connected) {
@@ -496,8 +530,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 noteTodoPlacements += NoteTodoPlacement(
                     todoId = placement.optLong("todoId"),
                     pageNumber = placement.optInt("pageNumber", 1).coerceAtLeast(1),
-                    x = placement.optDouble("x", 120.0).toFloat(),
-                    y = placement.optDouble("y", 220.0).toFloat(),
+                    x = placement.optDouble("x", 24.0).toFloat().coerceIn(0f, NOTE_PAGE_WIDTH),
+                    y = placement.optDouble("y", 32.0).toFloat().coerceIn(0f, NOTE_PAGE_HEIGHT),
                     widthDp = placement.optDouble("widthDp", 220.0).toFloat(),
                     heightDp = placement.optDouble("heightDp", 118.0).toFloat(),
                     fixed = placement.optBoolean("fixed", false)
@@ -505,7 +539,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         } else {
             todos.take(2).forEachIndexed { index, item ->
-                noteTodoPlacements += NoteTodoPlacement(item.id, 1, if (index == 0) 80f else 360f, if (index == 0) 84f else 156f, fixed = index == 1)
+                noteTodoPlacements += NoteTodoPlacement(item.id, 1, 24f, if (index == 0) 48f else 156f, fixed = index == 1)
             }
         }
     }

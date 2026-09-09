@@ -4,7 +4,7 @@
          that backs that folder (e.g. Google Drive), not this process. ACCESS_NETWORK_STATE is
          still required for WorkManager's NetworkType.CONNECTED sync constraint. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Lets the app hand a downloaded update.apk to the system installer. Android still forces
+    <!-- Lets the app hand a downloaded version-named APK to the system installer. Android still forces
          a user-facing "Install this app?" confirmation for any APK outside the Play Store; this
          permission only lets that installer screen be launched, it cannot skip the confirmation. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

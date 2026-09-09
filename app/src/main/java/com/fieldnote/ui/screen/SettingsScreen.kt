@@ -38,6 +38,7 @@ fun SettingsScreen(
     onSyncFolderPicked: (Uri) -> Unit,
     onSyncFolderDisconnected: () -> Unit,
     onSyncNow: () -> Unit,
+    onRefreshUpdate: () -> Unit,
     onClearConflicts: () -> Unit,
     onConflictPolicyChange: (ConflictPolicy) -> Unit,
     onInstallUpdate: () -> Unit,
@@ -52,7 +53,7 @@ fun SettingsScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
                 SettingsMenu(modifier = Modifier.width(220.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.weight(1f)) {
-                    VersionCard(uiState = uiState, updateState = updateState, onRefresh = onSyncNow, onInstallUpdate = onInstallUpdate)
+                    VersionCard(uiState = uiState, updateState = updateState, onRefresh = onRefreshUpdate, onInstallUpdate = onInstallUpdate)
                     SyncFolderCard(
                         state = syncState,
                         onPickFolder = { folderPickerLauncher.launch(null) },
@@ -67,7 +68,7 @@ fun SettingsScreen(
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SettingsMenu(modifier = Modifier.fillMaxWidth())
-                VersionCard(uiState = uiState, updateState = updateState, onRefresh = onSyncNow, onInstallUpdate = onInstallUpdate)
+                VersionCard(uiState = uiState, updateState = updateState, onRefresh = onRefreshUpdate, onInstallUpdate = onInstallUpdate)
                 SyncFolderCard(
                     state = syncState,
                     onPickFolder = { folderPickerLauncher.launch(null) },
@@ -118,7 +119,9 @@ private fun VersionCard(
             )
             Text(text = "대상 기기: ${uiState.targetDevices.joinToString()}", style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onRefresh) { Text("새로고침") }
+                OutlinedButton(onClick = onRefresh, enabled = !updateState.checking) {
+                    Text(if (updateState.checking) "확인 중" else "새로고침")
+                }
                 Button(onClick = onInstallUpdate, enabled = updateState.availableVersionName != null) { Text("업데이트") }
             }
         }

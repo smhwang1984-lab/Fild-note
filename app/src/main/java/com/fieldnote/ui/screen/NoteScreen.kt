@@ -52,6 +52,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -69,7 +70,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -102,8 +104,10 @@ private enum class NoteTool {
 /** One recorded point of a stroke. [pressure] is normalized 0f..1f -- Android maps the S Pen's
  * up-to-4096-level hardware pressure range onto this float, we don't see the raw 4096 steps
  * directly, only this already-scaled value. */
+@Immutable
 private data class StrokePoint(val position: Offset, val pressure: Float = 1f)
 
+@Immutable
 private data class InkStroke(
     val color: Color,
     val width: Float,
@@ -135,9 +139,10 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var pan by remember { mutableStateOf(Offset.Zero) }
     var penOnlyMode by remember { mutableStateOf(true) }
     var pagesOpen by remember { mutableStateOf(false) }
+    var lastLocalContent by remember(viewModel.currentNote.id) { mutableStateOf(viewModel.currentNote.content) }
 
     LaunchedEffect(viewModel.currentNote.content) {
-        if (encodePages(pageStrokes) != viewModel.currentNote.content) {
+        if (lastLocalContent != viewModel.currentNote.content) {
             val remotePages = decodePages(viewModel.currentNote.content)
             pageStrokes.clear()
             pageStrokes.putAll(remotePages)
@@ -147,6 +152,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
             undoStack = emptyList()
             redoStack = emptyList()
             selectedStrokes = emptySet()
+            lastLocalContent = viewModel.currentNote.content
         }
     }
 
@@ -157,7 +163,9 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     }
 
     fun persistNote() {
-        viewModel.saveNoteContent(encodePages(pageStrokes))
+        val content = encodePages(pageStrokes)
+        lastLocalContent = content
+        viewModel.saveNoteContent(content)
     }
 
     fun commitSnapshot(before: List<InkStroke>) {
@@ -619,6 +627,7 @@ private fun NoteCanvas(
 ) {
     val paperColor = Color(0xFFFFFCF6)
     val lineColor = Color(0xFFE5DDCD)
+    val paperShape = RoundedCornerShape(8.dp)
 
     // zoom/pan change continuously *during* the very pinch/pan/move gesture that produces them
     // (onZoomChange/onPanChange fire every frame). Using them as pointerInput keys used to
@@ -634,8 +643,9 @@ private fun NoteCanvas(
 
     Box(
         modifier = modifier
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-            .background(paperColor, RoundedCornerShape(8.dp))
+            .clip(paperShape)
+            .background(paperColor)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, paperShape)
             .pointerInput(activeTool, selectedColor, strokeWidth, strokeStability, penOnlyMode, strokes.size, selectedStrokes) {
                 awaitEachGesture {
                     // requireUnconsumed defaults to true: a touch that landed on a todo card
@@ -652,9 +662,9 @@ private fun NoteCanvas(
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.isEmpty()) break
                             if (pressed.size >= 2) {
-                                val zoomDelta = calculateZoomDelta(pressed)
-                                nextZoom = (nextZoom * zoomDelta).coerceIn(0.5f, 4f)
-                                nextPan += calculatePanDelta(pressed)
+                                val transform = calculateGestureTransform(pressed, nextZoom, nextPan)
+                                nextZoom = transform.zoom
+                                nextPan = transform.pan
                                 onZoomChange(nextZoom)
                                 onPanChange(nextPan)
                             } else {
@@ -682,9 +692,9 @@ private fun NoteCanvas(
                                 val pressed = event.changes.filter { it.pressed }
                                 if (pressed.isEmpty()) break
                                 if (pressed.size >= 2) {
-                                    val zoomDelta = calculateZoomDelta(pressed)
-                                    cutNextZoom = (cutNextZoom * zoomDelta).coerceIn(0.5f, 4f)
-                                    cutNextPan += calculatePanDelta(pressed)
+                                    val transform = calculateGestureTransform(pressed, cutNextZoom, cutNextPan)
+                                    cutNextZoom = transform.zoom
+                                    cutNextPan = transform.pan
                                     onZoomChange(cutNextZoom)
                                     onPanChange(cutNextPan)
                                     lastPoint = toNotePoint(pressed.first().position)
@@ -720,9 +730,9 @@ private fun NoteCanvas(
                                 val pressed = event.changes.filter { it.pressed }
                                 if (pressed.isEmpty()) break
                                 if (pressed.size >= 2) {
-                                    val zoomDelta = calculateZoomDelta(pressed)
-                                    cutNextZoom = (cutNextZoom * zoomDelta).coerceIn(0.5f, 4f)
-                                    cutNextPan += calculatePanDelta(pressed)
+                                    val transform = calculateGestureTransform(pressed, cutNextZoom, cutNextPan)
+                                    cutNextZoom = transform.zoom
+                                    cutNextPan = transform.pan
                                     onZoomChange(cutNextZoom)
                                     onPanChange(cutNextPan)
                                     continue
@@ -744,6 +754,7 @@ private fun NoteCanvas(
                     val points = mutableListOf<StrokePoint>()
                     var erased = before
                     var transformed = false
+                    var lastPenPoint: StrokePoint? = null
                     // The actual tool for THIS gesture is resolved once, from the first real
                     // pointer event -- not assumed up front. Previously the down position was
                     // added straight into `points` before anything was known about the S Pen's
@@ -765,7 +776,9 @@ private fun NoteCanvas(
                                 }
                                 val downPoint = toNotePoint(down.position)
                                 if (resolved == NoteTool.Pen) {
-                                    points.add(StrokePoint(downPoint, down.pressure.coerceIn(0f, 1f)))
+                                    val point = StrokePoint(downPoint, down.pressure.coerceIn(0f, 1f))
+                                    points.add(point)
+                                    lastPenPoint = point
                                 } else {
                                     erased = eraseNear(erased, downPoint, max(24f, strokeWidth * 2.5f) / nextZoom)
                                 }
@@ -778,9 +791,9 @@ private fun NoteCanvas(
                         if (pressed.size >= 2) {
                             transformed = true
                             onLiveStrokeChange(null)
-                            val zoomDelta = calculateZoomDelta(pressed)
-                            nextZoom = (nextZoom * zoomDelta).coerceIn(0.5f, 4f)
-                            nextPan += calculatePanDelta(pressed)
+                            val transform = calculateGestureTransform(pressed, nextZoom, nextPan)
+                            nextZoom = transform.zoom
+                            nextPan = transform.pan
                             onZoomChange(nextZoom)
                             onPanChange(nextPan)
                             continue
@@ -801,14 +814,19 @@ private fun NoteCanvas(
                         }
 
                         if (drawingTool == NoteTool.Pen) {
-                            points.add(StrokePoint(notePoint, change.pressure.coerceIn(0f, 1f)))
-                            onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizeLive(points, strokeStability)))
+                            val point = StrokePoint(notePoint, change.pressure.coerceIn(0f, 1f))
+                            lastPenPoint = point
+                            val pointAdded = appendStrokePoint(points, point, strokeStability)
+                            if (pointAdded) {
+                                onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizeLive(points, strokeStability)))
+                            }
                         } else {
                             erased = eraseNear(erased, notePoint, max(24f, strokeWidth * 2.5f) / nextZoom)
                         }
                     }
 
                     if (!transformed) {
+                        lastPenPoint?.let { appendStrokeEndpoint(points, it) }
                         if (before != erased) {
                             onEraseCommitted(before, erased)
                         } else if (resolved == NoteTool.Pen && points.isNotEmpty()) {
@@ -876,9 +894,14 @@ private fun TodoOnNoteCard(
     Card(
         modifier = Modifier
             .offset { IntOffset((placement.x * zoom + pan.x).roundToInt(), (placement.y * zoom + pan.y).roundToInt()) }
+            .graphicsLayer {
+                scaleX = zoom
+                scaleY = zoom
+                transformOrigin = TransformOrigin(0f, 0f)
+            }
             .width(placement.widthDp.dp)
             .height(placement.heightDp.dp)
-            .pointerInput(placement.fixed, zoom) {
+            .pointerInput(placement.fixed) {
                 // Consume the down (and every move) ourselves, immediately -- detectDragGestures
                 // only consumes once the drag exceeds touch slop, which was late enough that
                 // NoteCanvas's own gesture (which ignored consumption via requireUnconsumed =
@@ -893,7 +916,7 @@ private fun TodoOnNoteCard(
                         if (change == null || !change.pressed) break
                         val dragAmount = change.positionChange()
                         change.consume()
-                        if (!placement.fixed) onMoved(placement.todoId, dragAmount.x / zoom, dragAmount.y / zoom)
+                        if (!placement.fixed) onMoved(placement.todoId, dragAmount.x, dragAmount.y)
                     }
                 }
             },
@@ -947,12 +970,6 @@ private fun TodoOnNoteCard(
 
 private fun PointerType.isStylusInput(): Boolean = this == PointerType.Stylus || this == PointerType.Eraser
 
-private fun calculatePanDelta(changes: List<PointerInputChange>): Offset {
-    val current = changes.map { it.position }.averageOffset()
-    val previous = changes.map { it.previousPosition }.averageOffset()
-    return current - previous
-}
-
 private fun calculateZoomDelta(changes: List<PointerInputChange>): Float {
     val currentCentroid = changes.map { it.position }.averageOffset()
     val previousCentroid = changes.map { it.previousPosition }.averageOffset()
@@ -960,6 +977,33 @@ private fun calculateZoomDelta(changes: List<PointerInputChange>): Float {
     val previousDistance = changes.map { distance(it.previousPosition, previousCentroid) }.average().toFloat()
     if (previousDistance <= 0.5f || currentDistance <= 0.5f) return 1f
     return (currentDistance / previousDistance).coerceIn(0.85f, 1.18f)
+}
+
+internal data class CanvasTransform(val zoom: Float, val pan: Offset)
+
+private fun calculateGestureTransform(
+    changes: List<PointerInputChange>,
+    zoom: Float,
+    pan: Offset
+): CanvasTransform = transformAroundCentroid(
+    zoom = zoom,
+    pan = pan,
+    previousCentroid = changes.map { it.previousPosition }.averageOffset(),
+    currentCentroid = changes.map { it.position }.averageOffset(),
+    zoomDelta = calculateZoomDelta(changes)
+)
+
+internal fun transformAroundCentroid(
+    zoom: Float,
+    pan: Offset,
+    previousCentroid: Offset,
+    currentCentroid: Offset,
+    zoomDelta: Float
+): CanvasTransform {
+    val nextZoom = (zoom * zoomDelta).coerceIn(0.5f, 4f)
+    val appliedZoomDelta = nextZoom / zoom
+    val nextPan = currentCentroid - (previousCentroid - pan) * appliedZoomDelta
+    return CanvasTransform(nextZoom, nextPan)
 }
 
 private fun List<Offset>.averageOffset(): Offset {
@@ -984,19 +1028,35 @@ private const val DEFAULT_STABILITY = 0.7f
  * [stability] (0f..1f, from the settings slider) scales how aggressively points get merged and
  * how big a "hook" has to be before it's trimmed -- higher stability = steadier line, lower =
  * closer to the raw input. */
+private fun appendStrokePoint(
+    points: MutableList<StrokePoint>,
+    point: StrokePoint,
+    stability: Float
+): Boolean {
+    if (points.isEmpty()) {
+        points.add(point)
+        return true
+    }
+    val minDistance = 0.4 + stability.coerceIn(0f, 1f) * 2.0
+    if (distance(points.last().position, point.position) >= minDistance) {
+        points.add(point)
+        return true
+    }
+    return false
+}
+
+private fun appendStrokeEndpoint(points: MutableList<StrokePoint>, point: StrokePoint) {
+    if (points.isEmpty() || distance(points.last().position, point.position) >= 0.1) {
+        points.add(point)
+    }
+}
+
 private fun stabilizeLive(raw: List<StrokePoint>, stability: Float): List<StrokePoint> {
     if (raw.size <= 2) return raw
     val s = stability.coerceIn(0f, 1f)
-    val minDistance = 0.4 + s * 2.0
     val hookShortLength = 3.0 + s * 10.0
     val hookReversalLength = 8.0 + s * 20.0
-    val filtered = raw.fold(mutableListOf<StrokePoint>()) { acc, point ->
-        if (acc.isEmpty() || distance(acc.last().position, point.position) >= minDistance) acc.add(point)
-        acc
-    }
-    if (filtered.size <= 3) return filtered
-
-    val stable = filtered.toMutableList()
+    val stable = raw.toMutableList()
     val last = stable.last().position
     val prev = stable[stable.lastIndex - 1].position
     val beforePrev = stable[stable.lastIndex - 2].position
@@ -1106,31 +1166,20 @@ private fun DrawScope.drawInkStroke(stroke: InkStroke) {
         return
     }
 
-    // Pressure varies the line width; each mid-to-mid quadratic segment (the classic "smooth
-    // curve through points" trick) gets its own width from that segment's pressure so the taper
-    // reads naturally instead of stepping in visible chunks.
-    for (index in 0 until points.lastIndex - 1) {
-        val p0 = points[index]
-        val p1 = points[index + 1]
-        val p2 = points[index + 2]
-        val mid1 = Offset((p0.position.x + p1.position.x) / 2f, (p0.position.y + p1.position.y) / 2f)
-        val mid2 = Offset((p1.position.x + p2.position.x) / 2f, (p1.position.y + p2.position.y) / 2f)
-        val segment = Path().apply {
-            moveTo(mid1.x, mid1.y)
-            quadraticBezierTo(p1.position.x, p1.position.y, mid2.x, mid2.y)
-        }
-        val width = stroke.width * pressureWidthFactor(p1.pressure)
-        drawPath(segment, stroke.color, style = Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    // The points are already smoothed when the stroke is finalized. Drawing round line segments
+    // keeps pressure variation while avoiding a new Path allocation for every segment/frame.
+    for (index in 0 until points.lastIndex) {
+        val start = points[index]
+        val end = points[index + 1]
+        val pressure = (start.pressure + end.pressure) / 2f
+        drawLine(
+            color = stroke.color,
+            start = start.position,
+            end = end.position,
+            strokeWidth = stroke.width * pressureWidthFactor(pressure),
+            cap = StrokeCap.Round
+        )
     }
-    // The mid-to-mid trick leaves the very first/last half-segments undrawn; cap them off so the
-    // stroke reaches all the way to where the pen actually touched down and lifted.
-    val startMid = Offset((points[0].position.x + points[1].position.x) / 2f, (points[0].position.y + points[1].position.y) / 2f)
-    drawLine(stroke.color, points[0].position, startMid, stroke.width * pressureWidthFactor(points[0].pressure), cap = StrokeCap.Round)
-    val endMid = Offset(
-        (points[points.lastIndex - 1].position.x + points[points.lastIndex].position.x) / 2f,
-        (points[points.lastIndex - 1].position.y + points[points.lastIndex].position.y) / 2f
-    )
-    drawLine(stroke.color, endMid, points.last().position, stroke.width * pressureWidthFactor(points.last().pressure), cap = StrokeCap.Round)
 }
 
 private fun DrawScope.drawSelectionOutline(stroke: InkStroke) {

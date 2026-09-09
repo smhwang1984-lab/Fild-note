@@ -56,6 +56,10 @@ object AppUpdateChecker {
                 localApk.delete()
                 return UpdateCheckResult.Failed("update.apk 파일을 읽을 수 없습니다(손상되었거나 올바른 APK가 아님).")
             }
+            if (packageInfo.packageName != appContext.packageName) {
+                localApk.delete()
+                return UpdateCheckResult.Failed("다른 앱의 APK입니다: ${packageInfo.packageName}")
+            }
             val candidateVersionCode = packageInfo.longVersionCodeCompat()
             val candidateVersionName = packageInfo.versionName ?: "?"
             if (candidateVersionCode <= BuildConfig.VERSION_CODE.toLong()) {

@@ -3,6 +3,8 @@ package com.fieldnote
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -105,6 +107,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var updateState by mutableStateOf(UpdateUiState())
         private set
     private var pendingUpdate: UpdateInfo? = null
+    private var updateCheckJob: Job? = null
 
     var currentNote by mutableStateOf(localStore.ensureSeedData().toDocument())
         private set
@@ -130,6 +133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (session.connected) {
             SyncScheduler.ensurePeriodic(application)
             SyncScheduler.enqueue(application)
+            refreshUpdate()
         }
     }
 
@@ -193,6 +197,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         session.clear()
         SyncScheduler.cancel(app)
+        updateCheckJob?.cancel()
+        pendingUpdate = null
+        updateState = UpdateUiState()
         syncState = SyncUiState(message = "동기화 폴더 연결이 해제됐습니다. 기기의 데이터는 그대로입니다.")
         SyncStatusMonitor.update(
             SyncSnapshot(
@@ -239,13 +246,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Looks for a newer `update.apk` at the sync folder root. Runs after every successful sync
-     * (manual "동기화"/"새로고침" tap, the first sync right after picking a folder, and the
-     * periodic background sync), which is what satisfies "새로고침이나 최초 접속 시" without a
-     * separate startup poll.
+     * Looks for a newer `update.apk` at the sync folder root. This is independent from note-data
+     * sync so adding only an APK does not depend on a successful Notes/Todos synchronization.
      */
+    fun refreshUpdate() {
+        val treeUriString = session.treeUri
+        if (treeUriString == null) {
+            pendingUpdate = null
+            updateState = UpdateUiState(message = "먼저 동기화 폴더를 선택하세요.")
+            return
+        }
+        val treeUri = Uri.parse(treeUriString)
+        if (!getApplication<Application>().hasPersistedSyncPermission(treeUri)) {
+            pendingUpdate = null
+            updateState = UpdateUiState(message = "폴더 접근 권한이 사라졌습니다. 동기화 폴더를 다시 선택하세요.")
+            return
+        }
+        checkForUpdate(treeUri)
+    }
+
     private fun checkForUpdate(treeUri: Uri) {
-        viewModelScope.launch {
+        updateCheckJob?.cancel()
+        pendingUpdate = null
+        updateState = UpdateUiState(checking = true, message = "update.apk를 확인하는 중...")
+        updateCheckJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { AppUpdateChecker.check(getApplication(), treeUri) }
             when (result) {
                 is UpdateCheckResult.Available -> {
@@ -275,7 +299,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * requires the user to confirm the install themselves in that screen. */
     fun installUpdate() {
         val info = pendingUpdate ?: return
-        getApplication<Application>().startActivity(AppUpdateChecker.installIntent(getApplication(), info.apkFile))
+        val app = getApplication<Application>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !app.packageManager.canRequestPackageInstalls()) {
+            updateState = updateState.copy(
+                message = "설치 권한이 필요합니다. 열린 설정에서 '이 출처 허용'을 켠 뒤 업데이트를 다시 누르세요."
+            )
+            app.startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${app.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            return
+        }
+        try {
+            app.startActivity(AppUpdateChecker.installIntent(app, info.apkFile))
+        } catch (error: Exception) {
+            updateState = updateState.copy(message = "설치 화면을 열지 못했습니다: ${error.message ?: "알 수 없는 오류"}")
+        }
     }
 
     fun saveNoteContent(content: String) {

@@ -94,6 +94,7 @@ fun FieldNoteApp(viewModel: MainViewModel) {
                             onSyncFolderPicked = viewModel::onSyncFolderPicked,
                             onSyncFolderDisconnected = viewModel::disconnectSyncFolder,
                             onSyncNow = viewModel::syncNow,
+                            onRefreshUpdate = viewModel::refreshUpdate,
                             onClearConflicts = viewModel::clearConflicts,
                             onConflictPolicyChange = viewModel::setConflictPolicy,
                             onInstallUpdate = viewModel::installUpdate,

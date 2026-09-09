@@ -1,4 +1,5 @@
 package com.fieldnote.ui.screen
+import android.content.Context
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -81,6 +82,7 @@ import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -111,7 +113,8 @@ private data class StrokePoint(val position: Offset, val pressure: Float = 1f)
 private data class InkStroke(
     val color: Color,
     val width: Float,
-    val points: List<StrokePoint>
+    val points: List<StrokePoint>,
+    val isStabilized: Boolean = true
 )
 
 @Composable
@@ -140,9 +143,13 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var penOnlyMode by remember { mutableStateOf(true) }
     var pagesOpen by remember { mutableStateOf(false) }
     var lastLocalContent by remember(viewModel.currentNote.id) { mutableStateOf(viewModel.currentNote.content) }
+    var stabilizationGeneration by remember { mutableIntStateOf(0) }
+    val context = LocalContext.current
+    val zoomPreferences = remember(context) { context.getSharedPreferences("note_display", Context.MODE_PRIVATE) }
+    var favoriteZoom by remember { mutableFloatStateOf(zoomPreferences.getFloat("favorite_zoom", 1.5f).coerceIn(0.5f, 4f)) }
 
     LaunchedEffect(viewModel.currentNote.content) {
-        if (lastLocalContent != viewModel.currentNote.content) {
+        if (lastLocalContent != viewModel.currentNote.content && pageContentSignature(lastLocalContent) != pageContentSignature(viewModel.currentNote.content)) {
             val remotePages = decodePages(viewModel.currentNote.content)
             pageStrokes.clear()
             pageStrokes.putAll(remotePages)
@@ -156,6 +163,8 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         }
     }
 
+        lastLocalContent = viewModel.currentNote.content
+
     fun strokes(): List<InkStroke> = pageStrokes[currentPage].orEmpty()
 
     fun setStrokes(value: List<InkStroke>) {
@@ -163,11 +172,26 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     }
 
     fun persistNote() {
-        val content = encodePages(pageStrokes)
+        val content = encodePages(pageStrokes, lastLocalContent)
         lastLocalContent = content
         viewModel.saveNoteContent(content)
     }
 
+
+    LaunchedEffect(stabilizationGeneration, viewModel.currentNote.id) {
+        if (pageStrokes.values.none { strokes -> strokes.any { !it.isStabilized } }) return@LaunchedEffect
+        kotlinx.coroutines.delay(STROKE_STABILIZATION_DELAY_MS)
+        var changed = false
+        pageStrokes.keys.toList().forEach { page ->
+            pageStrokes[page] = pageStrokes[page].orEmpty().map { stroke ->
+                if (stroke.isStabilized) stroke else {
+                    changed = true
+                    stroke.copy(points = finalizeStroke(stroke.points, strokeStability), isStabilized = true)
+                }
+            }
+        }
+        if (changed) persistNote()
+    }
     fun commitSnapshot(before: List<InkStroke>) {
         undoStack = undoStack + listOf(before)
         redoStack = emptyList()
@@ -230,6 +254,8 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         persistNote()
     }
 
+    LaunchedEffect(currentPage) { viewModel.setActiveNotePage(currentPage) }
+
     ScreenFrame(
         title = "필드 노트",
         subtitle = "S펜 중심 필기 작업 공간"
@@ -253,6 +279,10 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 zoom = zoom,
                 onZoomIn = { zoom = (zoom + 0.25f).coerceAtMost(4f) },
                 onZoomOut = { zoom = (zoom - 0.25f).coerceAtMost(4f).coerceAtLeast(0.5f) },
+                favoriteZoom = favoriteZoom,
+                onZoomTo100 = { zoom = 1f },
+                onZoomToFavorite = { zoom = favoriteZoom },
+                onFavoriteZoomChange = { value -> favoriteZoom = value; zoomPreferences.edit().putFloat("favorite_zoom", value).apply() },
                 pagesOpen = pagesOpen,
                 onTogglePages = { pagesOpen = !pagesOpen }
             )
@@ -284,7 +314,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 lassoPoints = lassoPoints,
                 selectedStrokes = selectedStrokes,
                 todoItems = viewModel.todos,
-                todoPlacements = viewModel.noteTodoPlacements,
+                todoPlacements = viewModel.noteTodoPlacements.filter { it.pageNumber == currentPage },
                 activeTool = activeTool,
                 selectedColor = selectedColor,
                 strokeWidth = strokeWidth,
@@ -296,10 +326,12 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 onPanChange = { pan = it },
                 onLiveStrokeChange = { liveStroke = it },
                 onLassoChange = { lassoPoints = it },
+                onStrokeInput = { stabilizationGeneration += 1 },
                 onStrokeCommitted = { before, stroke ->
                     commitSnapshot(before)
                     setStrokes(before + stroke)
                     liveStroke = null
+                    stabilizationGeneration += 1
                     persistNote()
                 },
                 onEraseCommitted = { before, after ->
@@ -312,6 +344,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 onTodoResized = viewModel::resizeNoteTodo,
                 onTodoRemoved = viewModel::removeNoteTodo,
                 onTodoFixedChanged = viewModel::toggleNoteTodoFixed,
+                onTodoPlacementChanged = viewModel::saveNoteTodoPlacements,
                 onTodoCheckedChanged = viewModel::toggleTodo,
                 modifier = Modifier.fillMaxWidth().weight(1f)
             )
@@ -319,7 +352,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     }
 }
 
-private fun encodePages(pages: Map<Int, List<InkStroke>>): String {
+private fun encodePages(pages: Map<Int, List<InkStroke>>, existingContent: String = ""): String {
     val pageObject = JSONObject()
     pages.toSortedMap().forEach { (page, strokes) ->
         val strokeArray = JSONArray()
@@ -338,12 +371,15 @@ private fun encodePages(pages: Map<Int, List<InkStroke>>): String {
                     .put("color", stroke.color.toArgb())
                     .put("width", stroke.width.toDouble())
                     .put("points", points)
+                    .put("stabilized", stroke.isStabilized)
             )
         }
         pageObject.put(page.toString(), strokeArray)
     }
-    return JSONObject().put("pages", pageObject).toString()
+    return runCatching { JSONObject(existingContent) }.getOrElse { JSONObject() }.put("pages", pageObject).toString()
 }
+
+private fun pageContentSignature(content: String): String = runCatching { JSONObject(content).optJSONObject("pages")?.toString().orEmpty() }.getOrDefault("")
 
 private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatching {
     val result = mutableMapOf<Int, List<InkStroke>>()
@@ -371,7 +407,8 @@ private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatchin
                     InkStroke(
                         color = Color(strokeJson.getInt("color")),
                         width = strokeJson.getDouble("width").toFloat(),
-                        points = points
+                        points = points,
+                        isStabilized = strokeJson.optBoolean("stabilized", true)
                     )
                 )
             }
@@ -400,10 +437,15 @@ private fun NoteTopBar(
     zoom: Float,
     onZoomIn: () -> Unit,
     onZoomOut: () -> Unit,
+    favoriteZoom: Float,
+    onZoomTo100: () -> Unit,
+    onZoomToFavorite: () -> Unit,
+    onFavoriteZoomChange: (Float) -> Unit,
     pagesOpen: Boolean,
     onTogglePages: () -> Unit
 ) {
     var penMenuOpen by remember { mutableStateOf(false) }
+    var zoomMenuOpen by remember { mutableStateOf(false) }
     val colors = listOf(Color(0xFF171717), Color(0xFF1E5AA8), Color(0xFFC0392B), Color(0xFF2E7D32))
 
     Card(
@@ -456,7 +498,7 @@ private fun NoteTopBar(
                         )
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Icon(Icons.Filled.Palette, contentDescription = null)
-                            Text(text = "필체 안정성 ${(strokeStability * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                            Text(text = "스트로크 안정화 ${(strokeStability * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
                         }
                         Slider(
                             value = strokeStability * 100f,
@@ -483,7 +525,17 @@ private fun NoteTopBar(
             IconButton(onClick = onRedo, enabled = canRedo) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "다시 실행") }
 
             IconButton(onClick = onZoomOut) { Icon(Icons.Filled.ZoomOut, contentDescription = "축소") }
-            Text(text = "${(zoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+            Box {
+                Text(text = "${(zoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(8.dp).clickable { zoomMenuOpen = true })
+                DropdownMenu(expanded = zoomMenuOpen, onDismissRequest = { zoomMenuOpen = false }) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(onClick = { onZoomTo100(); zoomMenuOpen = false }, label = { Text("100%") })
+                        AssistChip(onClick = { onZoomToFavorite(); zoomMenuOpen = false }, label = { Text("즐겨찾기 ${(favoriteZoom * 100).roundToInt()}%") })
+                        Text(text = "즐겨찾기 비율", style = MaterialTheme.typography.bodySmall)
+                        Slider(value = favoriteZoom * 100f, onValueChange = { onFavoriteZoomChange((it / 100f).coerceIn(0.5f, 4f)) }, valueRange = 50f..400f, modifier = Modifier.width(200.dp))
+                    }
+                }
+            }
             IconButton(onClick = onZoomIn) { Icon(Icons.Filled.ZoomIn, contentDescription = "확대") }
         }
     }
@@ -616,12 +668,14 @@ private fun NoteCanvas(
     onLiveStrokeChange: (InkStroke?) -> Unit,
     onLassoChange: (List<Offset>?) -> Unit,
     onStrokeCommitted: (before: List<InkStroke>, stroke: InkStroke) -> Unit,
+    onStrokeInput: () -> Unit,
     onEraseCommitted: (before: List<InkStroke>, after: List<InkStroke>) -> Unit,
     onSelectionChanged: (Set<InkStroke>) -> Unit,
     onTodoMoved: (todoId: Long, dx: Float, dy: Float) -> Unit,
     onTodoResized: (todoId: Long, widthDeltaDp: Float, heightDeltaDp: Float) -> Unit,
     onTodoRemoved: (todoId: Long) -> Unit,
     onTodoFixedChanged: (todoId: Long) -> Unit,
+    onTodoPlacementChanged: () -> Unit,
     onTodoCheckedChanged: (todoId: Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -653,6 +707,27 @@ private fun NoteCanvas(
                     // skipped here instead of also starting a drawing gesture underneath it.
                     val down = awaitFirstDown()
                     val before = strokes.toList()
+                    if (activeTool == NoteTool.Pen && penOnlyMode && !down.type.isStylusInput()) {
+                        var nextPan = latestPan.value
+                        var nextZoom = latestZoom.value
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) break
+                            if (pressed.size >= 2) {
+                                val transform = calculateGestureTransform(pressed, nextZoom, nextPan)
+                                nextZoom = transform.zoom
+                                nextPan = transform.pan
+                                onZoomChange(nextZoom)
+                                onPanChange(nextPan)
+                            } else {
+                                val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
+                                nextPan += change.positionChange()
+                                onPanChange(nextPan)
+                            }
+                        }
+                        return@awaitEachGesture
+                    }
 
                     if (activeTool == NoteTool.Move) {
                         var nextPan = latestPan.value
@@ -816,9 +891,9 @@ private fun NoteCanvas(
                         if (drawingTool == NoteTool.Pen) {
                             val point = StrokePoint(notePoint, change.pressure.coerceIn(0f, 1f))
                             lastPenPoint = point
-                            val pointAdded = appendStrokePoint(points, point, strokeStability)
+                            val pointAdded = appendStrokePoint(points, point)
                             if (pointAdded) {
-                                onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, stabilizeLive(points, strokeStability)))
+                                onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, points.toList(), isStabilized = false))
                             }
                         } else {
                             erased = eraseNear(erased, notePoint, max(24f, strokeWidth * 2.5f) / nextZoom)
@@ -830,7 +905,7 @@ private fun NoteCanvas(
                         if (before != erased) {
                             onEraseCommitted(before, erased)
                         } else if (resolved == NoteTool.Pen && points.isNotEmpty()) {
-                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, finalizeStroke(points, strokeStability)))
+                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, points.toList(), isStabilized = false))
                         }
                     }
                 }
@@ -871,6 +946,7 @@ private fun NoteCanvas(
                     onResized = onTodoResized,
                     onRemoved = onTodoRemoved,
                     onFixedChanged = onTodoFixedChanged,
+                    onPlacementChangeFinished = onTodoPlacementChanged,
                     onCheckedChanged = onTodoCheckedChanged
                 )
             }
@@ -888,6 +964,7 @@ private fun TodoOnNoteCard(
     onResized: (todoId: Long, widthDeltaDp: Float, heightDeltaDp: Float) -> Unit,
     onRemoved: (todoId: Long) -> Unit,
     onFixedChanged: (todoId: Long) -> Unit,
+    onPlacementChangeFinished: () -> Unit,
     onCheckedChanged: (todoId: Long) -> Unit
 ) {
     val density = LocalDensity.current
@@ -910,6 +987,7 @@ private fun TodoOnNoteCard(
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     down.consume()
+                    var changed = false
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
@@ -946,6 +1024,7 @@ private fun TodoOnNoteCard(
                         awaitEachGesture {
                             val down = awaitFirstDown()
                             down.consume()
+                            var changed = false
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
@@ -956,8 +1035,10 @@ private fun TodoOnNoteCard(
                                     with(density) {
                                         onResized(todo.id, dragAmount.x.toDp().value, dragAmount.y.toDp().value)
                                     }
+                                    changed = changed || dragAmount.x != 0f || dragAmount.y != 0f
                                 }
                             }
+                            if (changed) onPlacementChangeFinished()
                         }
                     },
                 contentAlignment = Alignment.CenterEnd
@@ -1021,6 +1102,7 @@ private fun distance(a: Offset, b: Offset): Double {
 
 /** Default handwriting stability: 70%, adjustable 1%-100% from the pen settings panel. */
 private const val DEFAULT_STABILITY = 0.7f
+private const val STROKE_STABILIZATION_DELAY_MS = 3_000L
 
 /** Cheap per-frame filtering for the live preview while the pen is still moving: dedupe
  * near-duplicate points and drop a tail that whips back sharply (the "hook" flick that shows up
@@ -1030,14 +1112,13 @@ private const val DEFAULT_STABILITY = 0.7f
  * closer to the raw input. */
 private fun appendStrokePoint(
     points: MutableList<StrokePoint>,
-    point: StrokePoint,
-    stability: Float
+    point: StrokePoint
 ): Boolean {
     if (points.isEmpty()) {
         points.add(point)
         return true
     }
-    val minDistance = 0.4 + stability.coerceIn(0f, 1f) * 2.0
+    val minDistance = 0.4 // Input remains raw until the 3-second deferred stabilization pass.
     if (distance(points.last().position, point.position) >= minDistance) {
         points.add(point)
         return true

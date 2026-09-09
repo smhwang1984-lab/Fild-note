@@ -41,6 +41,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 private const val DEFAULT_DUE_DAY = 2
 
@@ -53,6 +55,7 @@ data class TodoItem(
 
 data class NoteTodoPlacement(
     val todoId: Long,
+    val pageNumber: Int = 1,
     val x: Float,
     val y: Float,
     val widthDp: Float = 220f,
@@ -114,6 +117,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val todos = mutableStateListOf<TodoItem>()
     val noteTodoPlacements = mutableStateListOf<NoteTodoPlacement>()
+    private var activeNotePage = 1
 
     // Debounces the sync trigger while pen strokes keep calling saveNoteContent() in quick
     // succession, so a drawing session enqueues one sync shortly after the user pauses instead
@@ -322,6 +326,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         localChanged()
     }
 
+    fun setActiveNotePage(pageNumber: Int) {
+        activeNotePage = pageNumber.coerceAtLeast(1)
+    }
+
     fun addTodo(title: String, dueDay: Int? = null) {
         val trimmedTitle = title.trim()
         if (trimmedTitle.isEmpty()) return
@@ -332,20 +340,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addTodoToNote(todoId: Long) {
-        if (noteTodoPlacements.any { it.todoId == todoId }) return
-        noteTodoPlacements.add(
-            NoteTodoPlacement(
-                todoId = todoId,
-                x = 120f,
-                y = 220f + (noteTodoPlacements.size * 36f)
-            )
-        )
+        if (noteTodoPlacements.any { it.todoId == todoId && it.pageNumber == activeNotePage }) return
+        noteTodoPlacements.add(NoteTodoPlacement(
+            todoId = todoId,
+            pageNumber = activeNotePage,
+            x = 120f,
+            y = 220f + (noteTodoPlacements.count { it.pageNumber == activeNotePage } * 36f)
+        ))
+        saveNoteTodoPlacements()
     }
 
     fun removeNoteTodo(todoId: Long) {
-        val placement = noteTodoPlacements.firstOrNull { it.todoId == todoId } ?: return
+        val placement = noteTodoPlacements.firstOrNull { it.todoId == todoId && it.pageNumber == activeNotePage } ?: return
         if (placement.fixed) return
-        noteTodoPlacements.removeAll { it.todoId == todoId }
+        noteTodoPlacements.removeAll { it.todoId == todoId && it.pageNumber == activeNotePage }
+        saveNoteTodoPlacements()
     }
 
     fun toggleTodo(todoId: Long) {
@@ -357,7 +366,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun moveNoteTodo(todoId: Long, dx: Float, dy: Float) {
-        val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId }
+        val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId && it.pageNumber == activeNotePage }
         if (index < 0 || noteTodoPlacements[index].fixed) return
         val current = noteTodoPlacements[index]
         noteTodoPlacements[index] = current.copy(
@@ -367,7 +376,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun resizeNoteTodo(todoId: Long, widthDeltaDp: Float, heightDeltaDp: Float) {
-        val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId }
+        val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId && it.pageNumber == activeNotePage }
         if (index < 0 || noteTodoPlacements[index].fixed) return
         val current = noteTodoPlacements[index]
         noteTodoPlacements[index] = current.copy(
@@ -377,14 +386,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleNoteTodoFixed(todoId: Long) {
-        val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId }
+        val index = noteTodoPlacements.indexOfFirst { it.todoId == todoId && it.pageNumber == activeNotePage }
         if (index >= 0) {
             noteTodoPlacements[index] = noteTodoPlacements[index].copy(
                 fixed = !noteTodoPlacements[index].fixed
             )
+            saveNoteTodoPlacements()
         }
     }
 
+    /** Persists a completed todo drag or resize once, not once per pointer frame. */
+    fun saveNoteTodoPlacements() {
+        val root = runCatching { JSONObject(currentNote.content) }.getOrElse { JSONObject() }
+        val placements = JSONArray()
+        noteTodoPlacements.forEach { placement ->
+            placements.put(
+                JSONObject()
+                    .put("todoId", placement.todoId)
+                    .put("pageNumber", placement.pageNumber)
+                    .put("x", placement.x.toDouble())
+                    .put("y", placement.y.toDouble())
+                    .put("widthDp", placement.widthDp.toDouble())
+                    .put("heightDp", placement.heightDp.toDouble())
+                    .put("fixed", placement.fixed)
+            )
+        }
+        root.put("todoPlacements", placements)
+        currentNote = localStore.saveNote(currentNote.id, currentNote.title, root.toString()).toDocument()
+        localChanged()
+    }
     private fun syncFailed(error: Throwable) {
         val snapshot = SyncSnapshot(
             phase = SyncPhase.Error,
@@ -447,20 +477,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun reloadFromDatabase() {
         currentNote = localStore.listNotes().firstOrNull()?.toDocument() ?: localStore.ensureSeedData().toDocument()
         reloadTodos()
+        reloadTodoPlacements()
     }
 
     private fun reloadTodos() {
         val records = localStore.listTodos()
         todos.clear()
         todos.addAll(records.map { TodoItem(it.id, it.title, it.dueDay, it.completed) })
-        if (noteTodoPlacements.isEmpty()) {
-            records.take(2).forEachIndexed { index, item ->
+    }
+
+    private fun reloadTodoPlacements() {
+        noteTodoPlacements.clear()
+        val root = runCatching { JSONObject(currentNote.content) }.getOrNull()
+        val savedPlacements = root?.optJSONArray("todoPlacements")
+        if (savedPlacements != null) {
+            for (index in 0 until savedPlacements.length()) {
+                val placement = savedPlacements.optJSONObject(index) ?: continue
                 noteTodoPlacements += NoteTodoPlacement(
-                    todoId = item.id,
-                    x = if (index == 0) 80f else 360f,
-                    y = if (index == 0) 84f else 156f,
-                    fixed = index == 1
+                    todoId = placement.optLong("todoId"),
+                    pageNumber = placement.optInt("pageNumber", 1).coerceAtLeast(1),
+                    x = placement.optDouble("x", 120.0).toFloat(),
+                    y = placement.optDouble("y", 220.0).toFloat(),
+                    widthDp = placement.optDouble("widthDp", 220.0).toFloat(),
+                    heightDp = placement.optDouble("heightDp", 118.0).toFloat(),
+                    fixed = placement.optBoolean("fixed", false)
                 )
+            }
+        } else {
+            todos.take(2).forEachIndexed { index, item ->
+                noteTodoPlacements += NoteTodoPlacement(item.id, 1, if (index == 0) 80f else 360f, if (index == 0) 84f else 156f, fixed = index == 1)
             }
         }
     }

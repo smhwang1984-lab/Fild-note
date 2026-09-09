@@ -1,4 +1,4 @@
-﻿package com.fieldnote.data
+package com.fieldnote.data
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,7 +19,7 @@ class LocalFieldNoteRepository : FieldNoteRepository {
             FeatureStatus("기본 화면", "1단계", "완료"),
             FeatureStatus("S펜 필기", "2단계", "완료"),
             FeatureStatus("제스처 확대/축소", "2단계", "완료"),
-            FeatureStatus("필기 끝 안정화", "2단계", "완료"),
+            FeatureStatus("스트로크 안정화", "2단계", "완료"),
             FeatureStatus("페이지 추가", "2단계", "완료"),
             FeatureStatus("노트 위 할 일 배치", "3단계", "완료"),
             FeatureStatus("할 일 크기 조정", "3단계", "완료"),

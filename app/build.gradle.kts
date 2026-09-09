@@ -21,8 +21,8 @@ android {
         applicationId = "com.fieldnote"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "1.2.5"
+        versionCode = 20
+        versionName = "1.2.8"
     }
 
     signingConfigs {
@@ -88,7 +88,3 @@ dependencies {
     // pull in the real implementation so FolderSyncManager's JSON parsing actually runs.
     testImplementation("org.json:json:20240303")
 }
-
-
-
-

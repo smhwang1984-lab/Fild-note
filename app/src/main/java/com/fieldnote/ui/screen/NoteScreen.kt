@@ -53,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -67,6 +68,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -76,11 +79,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
@@ -93,8 +99,12 @@ import com.fieldnote.ui.navigation.ScreenFrame
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
+
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private enum class NoteTool {
     Pen,
@@ -107,14 +117,15 @@ private enum class NoteTool {
  * up-to-4096-level hardware pressure range onto this float, we don't see the raw 4096 steps
  * directly, only this already-scaled value. */
 @Immutable
-private data class StrokePoint(val position: Offset, val pressure: Float = 1f)
+internal data class StrokePoint(val position: Offset, val pressure: Float = 1f)
 
 @Immutable
-private data class InkStroke(
+internal data class InkStroke(
     val color: Color,
     val width: Float,
     val points: List<StrokePoint>,
-    val isStabilized: Boolean = true
+    val isStabilized: Boolean = true,
+    val stabilizationBlock: Int = 0
 )
 
 @Composable
@@ -136,7 +147,7 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var selectedStrokes by remember { mutableStateOf<Set<InkStroke>>(emptySet()) }
     var activeTool by remember { mutableStateOf(NoteTool.Pen) }
     var selectedColor by remember { mutableStateOf(Color(0xFF171717)) }
-    var strokeWidth by remember { mutableFloatStateOf(6f) }
+    var strokeWidth by remember { mutableFloatStateOf(1.5f) }
     var strokeStability by remember { mutableFloatStateOf(DEFAULT_STABILITY) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
@@ -144,6 +155,17 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     var pagesOpen by remember { mutableStateOf(false) }
     var lastLocalContent by remember(viewModel.currentNote.id) { mutableStateOf(viewModel.currentNote.content) }
     var stabilizationGeneration by remember { mutableIntStateOf(0) }
+    var penInputActive by remember { mutableStateOf(false) }
+    var persistenceGeneration by remember { mutableIntStateOf(0) }
+    var activeStabilizationBlock by remember(viewModel.currentNote.id) {
+        val allStrokes = initialPages.values.flatten()
+        val pendingBlock = allStrokes
+            .filterNot { it.isStabilized }
+            .minOfOrNull { it.stabilizationBlock.coerceAtLeast(1) }
+        mutableIntStateOf(
+            pendingBlock ?: ((allStrokes.maxOfOrNull { it.stabilizationBlock } ?: 0) + 1).coerceAtLeast(1)
+        )
+    }
     val context = LocalContext.current
     val zoomPreferences = remember(context) { context.getSharedPreferences("note_display", Context.MODE_PRIVATE) }
     var favoriteZoom by remember { mutableFloatStateOf(zoomPreferences.getFloat("favorite_zoom", 1.5f).coerceIn(0.5f, 4f)) }
@@ -163,8 +185,6 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
         }
     }
 
-        lastLocalContent = viewModel.currentNote.content
-
     fun strokes(): List<InkStroke> = pageStrokes[currentPage].orEmpty()
 
     fun setStrokes(value: List<InkStroke>) {
@@ -172,25 +192,54 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
     }
 
     fun persistNote() {
-        val content = encodePages(pageStrokes, lastLocalContent)
+        persistenceGeneration += 1
+    }
+
+    LaunchedEffect(persistenceGeneration, viewModel.currentNote.id) {
+        if (persistenceGeneration == 0) return@LaunchedEffect
+        kotlinx.coroutines.delay(NOTE_PERSISTENCE_DELAY_MS)
+        val pagesSnapshot = pageStrokes.mapValues { (_, value) -> value.toList() }
+        val existingContent = lastLocalContent
+        val content = withContext(Dispatchers.Default) {
+            encodePages(pagesSnapshot, existingContent)
+        }
         lastLocalContent = content
         viewModel.saveNoteContent(content)
     }
 
+    DisposableEffect(viewModel.currentNote.id) {
+        onDispose {
+            val content = encodePages(pageStrokes.mapValues { it.value.toList() }, lastLocalContent)
+            viewModel.saveNoteContent(content, immediate = true)
+        }
+    }
 
-    LaunchedEffect(stabilizationGeneration, viewModel.currentNote.id) {
-        if (pageStrokes.values.none { strokes -> strokes.any { !it.isStabilized } }) return@LaunchedEffect
+    LaunchedEffect(stabilizationGeneration, penInputActive, activeStabilizationBlock, viewModel.currentNote.id) {
+        if (penInputActive) return@LaunchedEffect
+        val targetBlock = activeStabilizationBlock
+        if (pageStrokes.values.none { strokes ->
+                strokes.any { !it.isStabilized && it.stabilizationBlock == targetBlock }
+            }
+        ) return@LaunchedEffect
         kotlinx.coroutines.delay(STROKE_STABILIZATION_DELAY_MS)
+        if (penInputActive) return@LaunchedEffect
         var changed = false
         pageStrokes.keys.toList().forEach { page ->
-            pageStrokes[page] = pageStrokes[page].orEmpty().map { stroke ->
-                if (stroke.isStabilized) stroke else {
-                    changed = true
-                    stroke.copy(points = finalizeStroke(stroke.points, strokeStability), isStabilized = true)
-                }
-            }
+            val beforeBlock = pageStrokes[page].orEmpty()
+            val afterBlock = stabilizeStrokeBlock(beforeBlock, targetBlock, strokeStability)
+            if (afterBlock != beforeBlock) changed = true
+            pageStrokes[page] = afterBlock
         }
-        if (changed) persistNote()
+        if (changed) {
+            persistNote()
+            val nextPendingBlock = pageStrokes.values.flatten()
+                .filterNot { it.isStabilized }
+                .minOfOrNull { it.stabilizationBlock.coerceAtLeast(1) }
+            activeStabilizationBlock = nextPendingBlock ?: max(
+                targetBlock + 1,
+                (pageStrokes.values.flatten().maxOfOrNull { it.stabilizationBlock } ?: 0) + 1
+            )
+        }
     }
     fun commitSnapshot(before: List<InkStroke>) {
         undoStack = undoStack + listOf(before)
@@ -326,12 +375,16 @@ fun NoteScreen(viewModel: MainViewModel, tabletMode: Boolean) {
                 onPanChange = { pan = it },
                 onLiveStrokeChange = { liveStroke = it },
                 onLassoChange = { lassoPoints = it },
-                onStrokeInput = { stabilizationGeneration += 1 },
+                onPenInputStateChanged = { active ->
+                    if (penInputActive != active) {
+                        penInputActive = active
+                        if (!active) stabilizationGeneration += 1
+                    }
+                },
                 onStrokeCommitted = { before, stroke ->
                     commitSnapshot(before)
-                    setStrokes(before + stroke)
+                    setStrokes(before + stroke.copy(stabilizationBlock = activeStabilizationBlock))
                     liveStroke = null
-                    stabilizationGeneration += 1
                     persistNote()
                 },
                 onEraseCommitted = { before, after ->
@@ -361,8 +414,8 @@ private fun encodePages(pages: Map<Int, List<InkStroke>>, existingContent: Strin
             stroke.points.forEach { point ->
                 points.put(
                     JSONArray()
-                        .put(point.position.x.toDouble())
-                        .put(point.position.y.toDouble())
+                        .put(point.position.coerceToNotePage().x.toDouble())
+                        .put(point.position.coerceToNotePage().y.toDouble())
                         .put(point.pressure.toDouble())
                 )
             }
@@ -372,18 +425,27 @@ private fun encodePages(pages: Map<Int, List<InkStroke>>, existingContent: Strin
                     .put("width", stroke.width.toDouble())
                     .put("points", points)
                     .put("stabilized", stroke.isStabilized)
+                    .put("stabilizationBlock", stroke.stabilizationBlock)
             )
         }
         pageObject.put(page.toString(), strokeArray)
     }
-    return runCatching { JSONObject(existingContent) }.getOrElse { JSONObject() }.put("pages", pageObject).toString()
+    return runCatching { JSONObject(existingContent) }.getOrElse { JSONObject() }
+        .put("version", 3)
+        .put("pageWidth", NOTE_PAGE_WIDTH.toDouble())
+        .put("pageHeight", NOTE_PAGE_HEIGHT.toDouble())
+        .put("pages", pageObject)
+        .toString()
 }
 
 private fun pageContentSignature(content: String): String = runCatching { JSONObject(content).optJSONObject("pages")?.toString().orEmpty() }.getOrDefault("")
 
 private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatching {
     val result = mutableMapOf<Int, List<InkStroke>>()
-    val pages = JSONObject(content).getJSONObject("pages")
+    val root = JSONObject(content)
+    val legacyCoordinates = !root.has("pageWidth") || !root.has("pageHeight")
+    val legacyDocumentWidth = !legacyCoordinates && root.optInt("version", 2) < 3
+    val pages = root.getJSONObject("pages")
     pages.keys().forEach { pageKey ->
         val strokesJson = pages.getJSONArray(pageKey)
         val strokes = buildList {
@@ -403,21 +465,55 @@ private fun decodePages(content: String): Map<Int, List<InkStroke>> = runCatchin
                         )
                     }
                 }
+                val stabilized = strokeJson.optBoolean("stabilized", true)
                 add(
                     InkStroke(
                         color = Color(strokeJson.getInt("color")),
-                        width = strokeJson.getDouble("width").toFloat(),
+                        width = strokeJson.getDouble("width").toFloat() * if (legacyDocumentWidth) 0.25f else 1f,
                         points = points,
-                        isStabilized = strokeJson.optBoolean("stabilized", true)
+                        isStabilized = stabilized,
+                        stabilizationBlock = strokeJson.optInt(
+                            "stabilizationBlock",
+                            if (stabilized) 0 else 1
+                        )
                     )
                 )
             }
         }
-        result[pageKey.toInt()] = strokes
+        result[pageKey.toInt()] = if (legacyCoordinates) normalizeLegacyStrokes(strokes) else strokes.boundToNotePage()
     }
     result.ifEmpty { mapOf(1 to emptyList()) }
 }.getOrElse { mapOf(1 to emptyList()) }
 
+private fun Offset.isInsideNotePage(): Boolean = x in 0f..NOTE_PAGE_WIDTH && y in 0f..NOTE_PAGE_HEIGHT
+
+private fun Offset.coerceToNotePage(): Offset = Offset(
+    x.coerceIn(0f, NOTE_PAGE_WIDTH),
+    y.coerceIn(0f, NOTE_PAGE_HEIGHT)
+)
+
+private fun List<InkStroke>.boundToNotePage(): List<InkStroke> = map { stroke ->
+    stroke.copy(points = stroke.points.map { point -> point.copy(position = point.position.coerceToNotePage()) })
+}
+
+private fun normalizeLegacyStrokes(strokes: List<InkStroke>): List<InkStroke> {
+    val allPoints = strokes.flatMap { it.points.map(StrokePoint::position) }
+    if (allPoints.isEmpty()) return strokes
+    val minX = allPoints.minOf(Offset::x)
+    val minY = allPoints.minOf(Offset::y)
+    val maxX = allPoints.maxOf(Offset::x)
+    val maxY = allPoints.maxOf(Offset::y)
+    val scale = min(1f, min(NOTE_PAGE_WIDTH / max(1f, maxX - minX), NOTE_PAGE_HEIGHT / max(1f, maxY - minY)))
+    return strokes.map { stroke ->
+        stroke.copy(
+            width = max(0.1f, stroke.width * scale),
+            points = stroke.points.map { point ->
+                point.copy(position = Offset((point.position.x - min(0f, minX)) * scale, (point.position.y - min(0f, minY)) * scale).coerceToNotePage())
+            },
+            isStabilized = true
+        )
+    }
+}
 @Composable
 private fun NoteTopBar(
     activeTool: NoteTool,
@@ -487,12 +583,12 @@ private fun NoteTopBar(
                         }
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Icon(Icons.Filled.LineWeight, contentDescription = null)
-                            Text(text = "굵기 ${strokeWidth.toInt()}", style = MaterialTheme.typography.bodySmall)
+                            Text(text = "굵기 ${"%.1f".format(strokeWidth)}", style = MaterialTheme.typography.bodySmall)
                         }
                         Slider(
                             value = strokeWidth,
                             onValueChange = onStrokeWidthChange,
-                            valueRange = 2f..22f,
+                            valueRange = 0.5f..5f,
                             steps = 9,
                             modifier = Modifier.width(200.dp)
                         )
@@ -668,7 +764,7 @@ private fun NoteCanvas(
     onLiveStrokeChange: (InkStroke?) -> Unit,
     onLassoChange: (List<Offset>?) -> Unit,
     onStrokeCommitted: (before: List<InkStroke>, stroke: InkStroke) -> Unit,
-    onStrokeInput: () -> Unit,
+    onPenInputStateChanged: (Boolean) -> Unit,
     onEraseCommitted: (before: List<InkStroke>, after: List<InkStroke>) -> Unit,
     onSelectionChanged: (Set<InkStroke>) -> Unit,
     onTodoMoved: (todoId: Long, dx: Float, dy: Float) -> Unit,
@@ -681,7 +777,13 @@ private fun NoteCanvas(
 ) {
     val paperColor = Color(0xFFFFFCF6)
     val lineColor = Color(0xFFE5DDCD)
+    val pageBorderColor = MaterialTheme.colorScheme.outlineVariant
+    val workspaceColor = Color(0xFFE8E5DF)
     val paperShape = RoundedCornerShape(8.dp)
+    val density = LocalDensity.current
+    val pageMarginPx = with(density) { 12.dp.toPx() }
+    var viewportSize by remember { mutableStateOf(Size.Zero) }
+    val pageTransform = calculateNotePageTransform(viewportSize, zoom, pan, pageMarginPx)
 
     // zoom/pan change continuously *during* the very pinch/pan/move gesture that produces them
     // (onZoomChange/onPanChange fire every frame). Using them as pointerInput keys used to
@@ -692,21 +794,32 @@ private fun NoteCanvas(
     // value without needing to be a key.
     val latestZoom = rememberUpdatedState(zoom)
     val latestPan = rememberUpdatedState(pan)
+    val latestViewportSize = rememberUpdatedState(viewportSize)
+    val latestPageTransform = rememberUpdatedState(pageTransform)
+    val latestStrokes = rememberUpdatedState(strokes)
+    val latestSelectedStrokes = rememberUpdatedState(selectedStrokes)
+    val latestOnStrokeCommitted = rememberUpdatedState(onStrokeCommitted)
 
-    fun toNotePoint(screenPoint: Offset): Offset = (screenPoint - latestPan.value) / latestZoom.value
+    fun toNotePoint(screenPoint: Offset): Offset = latestPageTransform.value.screenToPage(screenPoint)
+
+    fun toNotePoint(screenPoint: Offset, currentZoom: Float, currentPan: Offset): Offset =
+        calculateNotePageTransform(latestViewportSize.value, currentZoom, currentPan, pageMarginPx)
+            .screenToPage(screenPoint)
 
     Box(
         modifier = modifier
             .clip(paperShape)
-            .background(paperColor)
+            .background(workspaceColor)
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, paperShape)
-            .pointerInput(activeTool, selectedColor, strokeWidth, strokeStability, penOnlyMode, strokes.size, selectedStrokes) {
+            .onSizeChanged { viewportSize = Size(it.width.toFloat(), it.height.toFloat()) }
+            .pointerInput(activeTool, selectedColor, strokeWidth, strokeStability, penOnlyMode) {
                 awaitEachGesture {
                     // requireUnconsumed defaults to true: a touch that landed on a todo card
                     // (which now consumes its own down/move events, see TodoOnNoteCard) is
                     // skipped here instead of also starting a drawing gesture underneath it.
                     val down = awaitFirstDown()
-                    val before = strokes.toList()
+                    val before = latestStrokes.value.toList()
+                    val selectedAtStart = latestSelectedStrokes.value
                     if (activeTool == NoteTool.Pen && penOnlyMode && !down.type.isStylusInput()) {
                         var nextPan = latestPan.value
                         var nextZoom = latestZoom.value
@@ -715,7 +828,7 @@ private fun NoteCanvas(
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.isEmpty()) break
                             if (pressed.size >= 2) {
-                                val transform = calculateGestureTransform(pressed, nextZoom, nextPan)
+                                val transform = calculateGestureTransform(pressed, nextZoom, nextPan, latestViewportSize.value.centerOffset())
                                 nextZoom = transform.zoom
                                 nextPan = transform.pan
                                 onZoomChange(nextZoom)
@@ -737,7 +850,7 @@ private fun NoteCanvas(
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.isEmpty()) break
                             if (pressed.size >= 2) {
-                                val transform = calculateGestureTransform(pressed, nextZoom, nextPan)
+                                val transform = calculateGestureTransform(pressed, nextZoom, nextPan, latestViewportSize.value.centerOffset())
                                 nextZoom = transform.zoom
                                 nextPan = transform.pan
                                 onZoomChange(nextZoom)
@@ -757,7 +870,7 @@ private fun NoteCanvas(
                         // nothing while Cut was active.
                         var cutNextPan = latestPan.value
                         var cutNextZoom = latestZoom.value
-                        if (selectedStrokes.isNotEmpty()) {
+                        if (selectedAtStart.isNotEmpty()) {
                             // A selection already exists: this drag moves it instead of starting
                             // a new lasso.
                             var lastPoint = toNotePoint(down.position)
@@ -767,21 +880,21 @@ private fun NoteCanvas(
                                 val pressed = event.changes.filter { it.pressed }
                                 if (pressed.isEmpty()) break
                                 if (pressed.size >= 2) {
-                                    val transform = calculateGestureTransform(pressed, cutNextZoom, cutNextPan)
+                                    val transform = calculateGestureTransform(pressed, cutNextZoom, cutNextPan, latestViewportSize.value.centerOffset())
                                     cutNextZoom = transform.zoom
                                     cutNextPan = transform.pan
                                     onZoomChange(cutNextZoom)
                                     onPanChange(cutNextPan)
-                                    lastPoint = toNotePoint(pressed.first().position)
+                                    lastPoint = toNotePoint(pressed.first().position, cutNextZoom, cutNextPan)
                                     continue
                                 }
                                 val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
-                                val notePoint = toNotePoint(change.position)
+                                val notePoint = toNotePoint(change.position, cutNextZoom, cutNextPan)
                                 val delta = notePoint - lastPoint
                                 lastPoint = notePoint
                                 moved = moved.map { stroke ->
-                                    if (stroke in selectedStrokes) {
-                                        stroke.copy(points = stroke.points.map { it.copy(position = it.position + delta) })
+                                    if (stroke in selectedAtStart) {
+                                        stroke.copy(points = stroke.points.map { it.copy(position = (it.position + delta).coerceToNotePage()) })
                                     } else {
                                         stroke
                                     }
@@ -792,7 +905,7 @@ private fun NoteCanvas(
                                 // moved is before mapped 1:1 (same size/order), so pair them up to
                                 // find selected strokes' new (moved) instances for the next drag.
                                 val newSelection = before.indices
-                                    .filter { before[it] in selectedStrokes }
+                                    .filter { before[it] in selectedAtStart }
                                     .map { moved[it] }
                                     .toSet()
                                 onSelectionChanged(newSelection)
@@ -805,7 +918,7 @@ private fun NoteCanvas(
                                 val pressed = event.changes.filter { it.pressed }
                                 if (pressed.isEmpty()) break
                                 if (pressed.size >= 2) {
-                                    val transform = calculateGestureTransform(pressed, cutNextZoom, cutNextPan)
+                                    val transform = calculateGestureTransform(pressed, cutNextZoom, cutNextPan, latestViewportSize.value.centerOffset())
                                     cutNextZoom = transform.zoom
                                     cutNextPan = transform.pan
                                     onZoomChange(cutNextZoom)
@@ -813,7 +926,7 @@ private fun NoteCanvas(
                                     continue
                                 }
                                 val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
-                                lasso.add(toNotePoint(change.position))
+                                lasso.add(toNotePoint(change.position, cutNextZoom, cutNextPan))
                                 onLassoChange(lasso.toList())
                             }
                             onLassoChange(null)
@@ -830,6 +943,7 @@ private fun NoteCanvas(
                     var erased = before
                     var transformed = false
                     var lastPenPoint: StrokePoint? = null
+                    var lastPreviewUpdateNanos = 0L
                     // The actual tool for THIS gesture is resolved once, from the first real
                     // pointer event -- not assumed up front. Previously the down position was
                     // added straight into `points` before anything was known about the S Pen's
@@ -849,13 +963,20 @@ private fun NoteCanvas(
                                     down.type == PointerType.Stylus && event.buttons.isPrimaryPressed -> NoteTool.Eraser
                                     else -> activeTool
                                 }
-                                val downPoint = toNotePoint(down.position)
-                                if (resolved == NoteTool.Pen) {
+                                val downTransform = calculateNotePageTransform(
+                                    latestViewportSize.value,
+                                    nextZoom,
+                                    nextPan,
+                                    pageMarginPx
+                                )
+                                val downPoint = downTransform.screenToPage(down.position)
+                                if (resolved == NoteTool.Pen && downPoint.isInsideNotePage()) {
                                     val point = StrokePoint(downPoint, down.pressure.coerceIn(0f, 1f))
                                     points.add(point)
                                     lastPenPoint = point
-                                } else {
-                                    erased = eraseNear(erased, downPoint, max(24f, strokeWidth * 2.5f) / nextZoom)
+                                    onPenInputStateChanged(true)
+                                } else if (downPoint.isInsideNotePage()) {
+                                    erased = eraseNear(erased, downPoint, max(8f, strokeWidth * 2.5f) / downTransform.scale)
                                 }
                             }
                         }
@@ -866,7 +987,7 @@ private fun NoteCanvas(
                         if (pressed.size >= 2) {
                             transformed = true
                             onLiveStrokeChange(null)
-                            val transform = calculateGestureTransform(pressed, nextZoom, nextPan)
+                            val transform = calculateGestureTransform(pressed, nextZoom, nextPan, latestViewportSize.value.centerOffset())
                             nextZoom = transform.zoom
                             nextPan = transform.pan
                             onZoomChange(nextZoom)
@@ -877,7 +998,14 @@ private fun NoteCanvas(
                         if (transformed) continue
                         val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
                         if (penOnlyMode && !change.type.isStylusInput()) continue
-                        val notePoint = (change.position - nextPan) / nextZoom
+                        val currentTransform = calculateNotePageTransform(
+                            latestViewportSize.value,
+                            nextZoom,
+                            nextPan,
+                            pageMarginPx
+                        )
+                        val rawNotePoint = currentTransform.screenToPage(change.position)
+                        val notePoint = rawNotePoint.coerceToNotePage()
                         // The S Pen's hardware eraser tip reports PointerType.Eraser. Holding the
                         // pen's side button while the tip touches down reports PointerType.Stylus
                         // with the primary button flagged in the pointer event -- treat that the
@@ -888,15 +1016,21 @@ private fun NoteCanvas(
                             else -> activeTool
                         }
 
-                        if (drawingTool == NoteTool.Pen) {
+                        if (drawingTool == NoteTool.Pen && points.isNotEmpty()) {
                             val point = StrokePoint(notePoint, change.pressure.coerceIn(0f, 1f))
                             lastPenPoint = point
                             val pointAdded = appendStrokePoint(points, point)
                             if (pointAdded) {
-                                onLiveStrokeChange(InkStroke(selectedColor, strokeWidth, points.toList(), isStabilized = false))
+                                val now = System.nanoTime()
+                                if (now - lastPreviewUpdateNanos >= LIVE_STROKE_PREVIEW_INTERVAL_NS) {
+                                    onLiveStrokeChange(
+                                        InkStroke(selectedColor, strokeWidth, points.toList(), isStabilized = false)
+                                    )
+                                    lastPreviewUpdateNanos = now
+                                }
                             }
-                        } else {
-                            erased = eraseNear(erased, notePoint, max(24f, strokeWidth * 2.5f) / nextZoom)
+                        } else if (rawNotePoint.isInsideNotePage()) {
+                            erased = eraseNear(erased, notePoint, max(8f, strokeWidth * 2.5f) / currentTransform.scale)
                         }
                     }
 
@@ -905,43 +1039,52 @@ private fun NoteCanvas(
                         if (before != erased) {
                             onEraseCommitted(before, erased)
                         } else if (resolved == NoteTool.Pen && points.isNotEmpty()) {
-                            onStrokeCommitted(before, InkStroke(selectedColor, strokeWidth, points.toList(), isStabilized = false))
+                            latestOnStrokeCommitted.value(
+                                before,
+                                InkStroke(selectedColor, strokeWidth, points.toList(), isStabilized = false)
+                            )
                         }
                     }
+                    if (resolved == NoteTool.Pen) onPenInputStateChanged(false)
                 }
             }
             .padding(1.dp)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val horizontalGap = 32.dp.toPx() * zoom
-            var y = pan.y + 48.dp.toPx() * zoom
-            while (y < size.height) {
-                if (y >= 0f) {
-                    drawLine(lineColor, Offset(24.dp.toPx(), y), Offset(size.width - 24.dp.toPx(), y), 1.dp.toPx())
+            val transform = calculateNotePageTransform(size, zoom, pan, pageMarginPx)
+            drawRect(paperColor, topLeft = transform.origin, size = transform.pageSize)
+            drawRect(pageBorderColor, topLeft = transform.origin, size = transform.pageSize, style = Stroke(1.dp.toPx()))
+            clipRect(
+                transform.origin.x,
+                transform.origin.y,
+                transform.origin.x + transform.pageSize.width,
+                transform.origin.y + transform.pageSize.height
+            ) {
+                drawContext.canvas.save()
+                drawContext.canvas.translate(transform.origin.x, transform.origin.y)
+                drawContext.canvas.scale(transform.scale, transform.scale)
+                val lineStrokeWidth = 1.dp.toPx() / transform.scale
+                var y = 16f
+                while (y < NOTE_PAGE_HEIGHT) {
+                    drawLine(lineColor, Offset(12f, y), Offset(NOTE_PAGE_WIDTH - 12f, y), lineStrokeWidth)
+                    y += 8f
                 }
-                y += horizontalGap
+                strokes.forEach { stroke ->
+                    drawInkStroke(stroke)
+                    if (stroke in selectedStrokes) drawSelectionOutline(stroke)
+                }
+                liveStroke?.let { drawInkStroke(it) }
+                lassoPoints?.let { drawLasso(it) }
+                drawContext.canvas.restore()
             }
-
-            drawContext.canvas.save()
-            drawContext.canvas.translate(pan.x, pan.y)
-            drawContext.canvas.scale(zoom, zoom)
-            strokes.forEach { stroke ->
-                drawInkStroke(stroke)
-                if (stroke in selectedStrokes) drawSelectionOutline(stroke)
-            }
-            liveStroke?.let { drawInkStroke(it) }
-            lassoPoints?.let { drawLasso(it) }
-            drawContext.canvas.restore()
         }
-
         todoPlacements.forEach { placement ->
             val todo = todoItems.firstOrNull { it.id == placement.todoId }
             if (todo != null) {
                 TodoOnNoteCard(
                     todo = todo,
                     placement = placement,
-                    zoom = zoom,
-                    pan = pan,
+                    pageTransform = pageTransform,
                     onMoved = onTodoMoved,
                     onResized = onTodoResized,
                     onRemoved = onTodoRemoved,
@@ -958,8 +1101,7 @@ private fun NoteCanvas(
 private fun TodoOnNoteCard(
     todo: TodoItem,
     placement: NoteTodoPlacement,
-    zoom: Float,
-    pan: Offset,
+    pageTransform: NotePageTransform,
     onMoved: (todoId: Long, dx: Float, dy: Float) -> Unit,
     onResized: (todoId: Long, widthDeltaDp: Float, heightDeltaDp: Float) -> Unit,
     onRemoved: (todoId: Long) -> Unit,
@@ -968,16 +1110,28 @@ private fun TodoOnNoteCard(
     onCheckedChanged: (todoId: Long) -> Unit
 ) {
     val density = LocalDensity.current
+    val cardWidthDp = placement.widthDp.coerceIn(40f, NOTE_PAGE_WIDTH)
+    val cardHeightDp = placement.heightDp.coerceIn(36f, NOTE_PAGE_HEIGHT)
+    val cardWidth = cardWidthDp
+    val cardHeight = cardHeightDp
+    val cardX = placement.x.coerceIn(0f, max(0f, NOTE_PAGE_WIDTH - cardWidth))
+    val cardY = placement.y.coerceIn(0f, max(0f, NOTE_PAGE_HEIGHT - cardHeight))
+    val composableScale = pageTransform.scale / density.density
     Card(
         modifier = Modifier
-            .offset { IntOffset((placement.x * zoom + pan.x).roundToInt(), (placement.y * zoom + pan.y).roundToInt()) }
+            .offset {
+                IntOffset(
+                    (cardX * pageTransform.scale + pageTransform.origin.x).roundToInt(),
+                    (cardY * pageTransform.scale + pageTransform.origin.y).roundToInt()
+                )
+            }
             .graphicsLayer {
-                scaleX = zoom
-                scaleY = zoom
+                scaleX = composableScale
+                scaleY = composableScale
                 transformOrigin = TransformOrigin(0f, 0f)
             }
-            .width(placement.widthDp.dp)
-            .height(placement.heightDp.dp)
+            .width(cardWidthDp.dp)
+            .height(cardHeightDp.dp)
             .pointerInput(placement.fixed) {
                 // Consume the down (and every move) ourselves, immediately -- detectDragGestures
                 // only consumes once the drag exceeds touch slop, which was late enough that
@@ -994,8 +1148,12 @@ private fun TodoOnNoteCard(
                         if (change == null || !change.pressed) break
                         val dragAmount = change.positionChange()
                         change.consume()
-                        if (!placement.fixed) onMoved(placement.todoId, dragAmount.x, dragAmount.y)
+                        if (!placement.fixed) {
+                            onMoved(placement.todoId, dragAmount.x / pageTransform.scale, dragAmount.y / pageTransform.scale)
+                            changed = changed || dragAmount.x != 0f || dragAmount.y != 0f
+                        }
                     }
+                    if (changed) onPlacementChangeFinished()
                 }
             },
         shape = RoundedCornerShape(8.dp),
@@ -1032,9 +1190,11 @@ private fun TodoOnNoteCard(
                                 val dragAmount = change.positionChange()
                                 change.consume()
                                 if (!placement.fixed) {
-                                    with(density) {
-                                        onResized(todo.id, dragAmount.x.toDp().value, dragAmount.y.toDp().value)
-                                    }
+                                    onResized(
+                                        todo.id,
+                                        dragAmount.x / pageTransform.scale,
+                                        dragAmount.y / pageTransform.scale
+                                    )
                                     changed = changed || dragAmount.x != 0f || dragAmount.y != 0f
                                 }
                             }
@@ -1048,6 +1208,39 @@ private fun TodoOnNoteCard(
         }
     }
 }
+
+internal data class NotePageTransform(
+    val origin: Offset,
+    val scale: Float,
+    val pageSize: Size
+) {
+    fun screenToPage(point: Offset): Offset = (point - origin) / scale
+    fun pageToScreen(point: Offset): Offset = origin + point * scale
+}
+
+internal fun calculateNotePageTransform(
+    viewport: Size,
+    zoom: Float,
+    pan: Offset,
+    marginPx: Float
+): NotePageTransform {
+    val availableWidth = (viewport.width - marginPx * 2f).coerceAtLeast(1f)
+    val availableHeight = (viewport.height - marginPx * 2f).coerceAtLeast(1f)
+    val baseScale = if (viewport.width > 0f && viewport.height > 0f) {
+        min(availableWidth / NOTE_PAGE_WIDTH, availableHeight / NOTE_PAGE_HEIGHT)
+    } else {
+        1f
+    }
+    val scale = (baseScale * zoom.coerceIn(0.5f, 4f)).coerceAtLeast(0.0001f)
+    val pageSize = Size(NOTE_PAGE_WIDTH * scale, NOTE_PAGE_HEIGHT * scale)
+    val centeredOrigin = Offset(
+        (viewport.width - pageSize.width) / 2f,
+        (viewport.height - pageSize.height) / 2f
+    )
+    return NotePageTransform(centeredOrigin + pan, scale, pageSize)
+}
+
+private fun Size.centerOffset(): Offset = Offset(width / 2f, height / 2f)
 
 private fun PointerType.isStylusInput(): Boolean = this == PointerType.Stylus || this == PointerType.Eraser
 
@@ -1065,13 +1258,15 @@ internal data class CanvasTransform(val zoom: Float, val pan: Offset)
 private fun calculateGestureTransform(
     changes: List<PointerInputChange>,
     zoom: Float,
-    pan: Offset
+    pan: Offset,
+    viewportCenter: Offset
 ): CanvasTransform = transformAroundCentroid(
     zoom = zoom,
     pan = pan,
     previousCentroid = changes.map { it.previousPosition }.averageOffset(),
     currentCentroid = changes.map { it.position }.averageOffset(),
-    zoomDelta = calculateZoomDelta(changes)
+    zoomDelta = calculateZoomDelta(changes),
+    viewportCenter = viewportCenter
 )
 
 internal fun transformAroundCentroid(
@@ -1079,11 +1274,13 @@ internal fun transformAroundCentroid(
     pan: Offset,
     previousCentroid: Offset,
     currentCentroid: Offset,
-    zoomDelta: Float
+    zoomDelta: Float,
+    viewportCenter: Offset = Offset.Zero
 ): CanvasTransform {
     val nextZoom = (zoom * zoomDelta).coerceIn(0.5f, 4f)
     val appliedZoomDelta = nextZoom / zoom
-    val nextPan = currentCentroid - (previousCentroid - pan) * appliedZoomDelta
+    val nextPan = currentCentroid - viewportCenter -
+        (previousCentroid - viewportCenter - pan) * appliedZoomDelta
     return CanvasTransform(nextZoom, nextPan)
 }
 
@@ -1102,85 +1299,44 @@ private fun distance(a: Offset, b: Offset): Double {
 
 /** Default handwriting stability: 70%, adjustable 1%-100% from the pen settings panel. */
 private const val DEFAULT_STABILITY = 0.7f
-private const val STROKE_STABILIZATION_DELAY_MS = 3_000L
+private const val STROKE_STABILIZATION_DELAY_MS = 2_000L
+private const val NOTE_PERSISTENCE_DELAY_MS = 300L
+private const val LIVE_STROKE_PREVIEW_INTERVAL_NS = 16_000_000L
+private const val NOTE_PAGE_WIDTH = 210f
+private const val NOTE_PAGE_HEIGHT = 297f
 
-/** Cheap per-frame filtering for the live preview while the pen is still moving: dedupe
- * near-duplicate points and drop a tail that whips back sharply (the "hook" flick that shows up
- * right as a fast stroke starts to lift). Kept light so it can run on every touch-move event.
- * [stability] (0f..1f, from the settings slider) scales how aggressively points get merged and
- * how big a "hook" has to be before it's trimmed -- higher stability = steadier line, lower =
- * closer to the raw input. */
+/** Live input stays raw. Only an exactly repeated sample is ignored. */
 private fun appendStrokePoint(
     points: MutableList<StrokePoint>,
     point: StrokePoint
 ): Boolean {
-    if (points.isEmpty()) {
-        points.add(point)
-        return true
-    }
-    val minDistance = 0.4 // Input remains raw until the 3-second deferred stabilization pass.
-    if (distance(points.last().position, point.position) >= minDistance) {
-        points.add(point)
-        return true
-    }
-    return false
+    if (points.lastOrNull() == point) return false
+    points.add(point)
+    return true
 }
 
 private fun appendStrokeEndpoint(points: MutableList<StrokePoint>, point: StrokePoint) {
-    if (points.isEmpty() || distance(points.last().position, point.position) >= 0.1) {
-        points.add(point)
-    }
-}
-
-private fun stabilizeLive(raw: List<StrokePoint>, stability: Float): List<StrokePoint> {
-    if (raw.size <= 2) return raw
-    val s = stability.coerceIn(0f, 1f)
-    val hookShortLength = 3.0 + s * 10.0
-    val hookReversalLength = 8.0 + s * 20.0
-    val stable = raw.toMutableList()
-    val last = stable.last().position
-    val prev = stable[stable.lastIndex - 1].position
-    val beforePrev = stable[stable.lastIndex - 2].position
-    val v1 = prev - beforePrev
-    val v2 = last - prev
-    val lastLength = distance(prev, last)
-    val dot = v1.x * v2.x + v1.y * v2.y
-    if (lastLength < hookShortLength || (dot < 0f && lastLength < hookReversalLength)) {
-        stable.removeAt(stable.lastIndex)
-    }
-    return stable
+    if (points.lastOrNull() != point) points.add(point)
 }
 
 /**
- * One-time, higher-quality pass applied when a stroke is finalized (pen lift):
- * - Runs [stabilizeLive] first (dedupe + tail-hook trim).
- * - Trims a short hook at the START too -- the live filter only ever sees the tail, since the
- *   start point is fixed the moment the pen touches down.
- * - A 3-point weighted moving average rounds out sharp corners and smooths the zigzag that fast
- *   handwriting produces, without moving the fixed first/last point (keeps the stroke anchored
- *   exactly where the pen touched down and lifted). [stability] scales how strong that averaging
- *   is: 0% leaves points untouched, 100% is the strongest smoothing offered.
+ * Deferred stabilization used only after four seconds without pen input. Samples are first
+ * spaced uniformly along the original polyline, then receive one gentle weighted pass. Start and
+ * end points are always preserved, and no "hook" points are cut away.
  */
-private fun finalizeStroke(raw: List<StrokePoint>, stability: Float): List<StrokePoint> {
+internal fun finalizeStroke(raw: List<StrokePoint>, stability: Float): List<StrokePoint> {
     val s = stability.coerceIn(0f, 1f)
-    var points = stabilizeLive(raw, s)
-    if (points.size < 5) return points
-
-    val first = points[0].position
-    val second = points[1].position
-    val third = points[2].position
-    val v1 = second - first
-    val v2 = third - second
-    val firstLength = distance(first, second)
-    val dot = v1.x * v2.x + v1.y * v2.y
-    val hookShortLength = 3.0 + s * 10.0
-    val hookReversalLength = 8.0 + s * 20.0
-    if (firstLength < hookShortLength || (dot < 0f && firstLength < hookReversalLength)) {
-        points = points.drop(1)
+    val deduplicated = raw.fold(mutableListOf<StrokePoint>()) { result, point ->
+        if (result.lastOrNull() != point) result.add(point)
+        result
     }
-    if (points.size < 5) return points
+    if (deduplicated.size < 3 || s <= 0.01f) return deduplicated
 
-    val smoothing = s * 0.25f
+    val spacing = 0.2f + 0.35f * s
+    val points = resampleStroke(deduplicated, spacing)
+    if (points.size < 3) return points
+
+    val smoothing = 0.05f + 0.15f * s
     val smoothed = points.toMutableList()
     for (i in 1 until points.lastIndex) {
         val prev = points[i - 1].position
@@ -1193,6 +1349,47 @@ private fun finalizeStroke(raw: List<StrokePoint>, stability: Float): List<Strok
         smoothed[i] = current.copy(position = position)
     }
     return smoothed
+}
+
+internal fun stabilizeStrokeBlock(
+    strokes: List<InkStroke>,
+    targetBlock: Int,
+    stability: Float
+): List<InkStroke> = strokes.map { stroke ->
+    if (stroke.isStabilized || stroke.stabilizationBlock != targetBlock) {
+        stroke
+    } else {
+        stroke.copy(points = finalizeStroke(stroke.points, stability), isStabilized = true)
+    }
+}
+
+private fun resampleStroke(points: List<StrokePoint>, spacing: Float): List<StrokePoint> {
+    if (points.size < 2) return points
+    val result = mutableListOf(points.first())
+    var previous = points.first()
+    var carried = 0f
+    for (index in 1 until points.size) {
+        val target = points[index]
+        var segmentStart = previous
+        var segmentLength = distance(segmentStart.position, target.position).toFloat()
+        if (segmentLength == 0f) continue
+        while (carried + segmentLength >= spacing) {
+            val ratio = ((spacing - carried) / segmentLength).coerceIn(0f, 1f)
+            val sampled = StrokePoint(
+                position = segmentStart.position + (target.position - segmentStart.position) * ratio,
+                pressure = segmentStart.pressure + (target.pressure - segmentStart.pressure) * ratio
+            )
+            result.add(sampled)
+            segmentStart = sampled
+            segmentLength = distance(segmentStart.position, target.position).toFloat()
+            carried = 0f
+            if (segmentLength == 0f) break
+        }
+        carried += segmentLength
+        previous = target
+    }
+    if (result.last() != points.last()) result.add(points.last())
+    return result
 }
 
 private fun eraseNear(strokes: List<InkStroke>, point: Offset, radius: Float): List<InkStroke> {

@@ -114,7 +114,7 @@ private fun VersionCard(
         Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(16.dp)) {
             Text(text = "현재 버전: ${uiState.versionName}", style = MaterialTheme.typography.titleMedium)
             Text(
-                text = updateState.message ?: "동기화 폴더 루트에 update.apk 파일을 두면 동기화할 때마다 자동으로 확인합니다.",
+                text = updateState.message ?: "동기화 폴더 루트에 FieldNote-vX.Y.Z.apk 형식의 파일을 두면 자동으로 상위 버전을 확인합니다. SHA 파일은 선택 사항입니다.",
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(text = "대상 기기: ${uiState.targetDevices.joinToString()}", style = MaterialTheme.typography.bodySmall)

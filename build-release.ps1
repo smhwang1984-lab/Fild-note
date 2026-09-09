@@ -85,12 +85,15 @@ try {
     New-Item -ItemType Directory -Force $releaseDir | Out-Null
     $releaseApk = Join-Path $releaseDir "FieldNote-v$expectedVersionName-release.apk"
     Copy-Item -Force $apk $releaseApk
+    $updateApk = Join-Path $releaseDir "update.apk"
+    Copy-Item -Force $releaseApk $updateApk
 
     $hash = Get-FileHash -Algorithm SHA256 $releaseApk
     $hashFile = Join-Path $releaseDir "FieldNote-v$expectedVersionName-release.sha256"
     "$($hash.Hash.ToLowerInvariant())  FieldNote-v$expectedVersionName-release.apk" | Set-Content -Encoding ASCII $hashFile
 
     Write-Host "Release APK: $releaseApk"
+    Write-Host "Drive update APK: $updateApk"
     Write-Host "Package: $actualPackage"
     Write-Host "Version: $actualVersionName ($actualVersionCode)"
     Write-Host "Signer SHA-1: $expectedSha1"
